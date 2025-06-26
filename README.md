@@ -1,306 +1,275 @@
-# NLP Video Editor (Prototype)
+# Cre8rFlow Video Editor
 
-This project is an NLP-based video editing tool that allows users to edit videos on a timeline using natural language commands.
+A modern, professional video editing application built with React, TypeScript, and Supabase. Features an advanced timeline playback system with interval tree-based clip management for seamless video editing.
 
-## Major Upgrade: AI-Powered NLP Command Parsing (2024-06-15)
+## 🎬 Features
 
-The command parser is now powered by OpenAI's GPT-4 (or similar), enabling robust, flexible natural language understanding. Users can enter free-form, conversational commands (even with typos or casual phrasing), and the system will interpret and apply the intended edits to the video timeline.
+- **Advanced Timeline Playback**: Seamless clip transitions with interval tree O(log n) lookup
+- **Drag & Drop Interface**: Intuitive asset management and timeline editing
+- **Real-time Preview**: Synchronized video playback with timeline cursor
+- **Clip Management**: Join, split, and manipulate video clips with precision
+- **Asset Library**: Upload and organize video files with cloud storage
+- **Responsive Design**: Modern UI with shadcn/ui components
 
-- **Regex/spaCy-based parsing is deprecated.**
-- **All command parsing is routed through an OpenAI-powered backend endpoint.**
-- **A clear schema for AI output (edit intent JSON) is enforced.**
-- **Backend validates and applies AI-generated instructions to the timeline JSON.**
-- **Frontend sends raw commands to the backend and updates state/UI based on structured responses.**
-- **Fallback/error handling and context-awareness strategies are implemented.**
+## 🏗️ Architecture
 
-## How It Works
-1. User enters a free-form command in the UI (e.g., "cut out the part where the guy in the grey quarter zip is talking").
-2. Frontend sends the command to the backend (`/api/parseCommand`).
-3. Backend calls OpenAI's API with a prompt and schema, receives structured JSON.
-4. Backend validates the JSON and applies the edit to the timeline (and saves to Supabase).
-5. Updated timeline JSON is returned to the frontend, which updates state/UI and preview.
-6. If parsing fails or is ambiguous, the user receives a clear error or feedback message.
+### Timeline Playback System
 
-## Command Schema Example
-```json
-{
-  "action": "cut",
-  "start": 5,
-  "end": 10
+The core innovation of this editor is the **interval tree-based timeline playback system**:
+
+- **Immediate URL Preloading**: Video URLs are generated when clips are placed on timeline
+- **Binary Search Optimization**: O(log n) clip lookup for any timeline position
+- **Promise Deduplication**: Prevents race conditions during video loading
+- **RequestAnimationFrame**: Smooth timeline progression with 60fps updates
+- **Error Recovery**: Robust handling of video loading failures
+
+### Key Components
+
+- `useIntervalTimeline.ts` - Core timeline playback logic with interval tree
+- `VideoPlayer.tsx` - Synchronized video preview component
+- `Timeline.tsx` - Visual timeline interface with drag/drop
+- `AssetPanel.tsx` - Asset management and upload system
+
+## 🚀 Getting Started
+
+### Prerequisites
+
+- Node.js 18+ 
+- npm or yarn
+- Supabase account (for backend services)
+
+### Installation
+
+1. **Clone the repository**
+   ```bash
+   git clone https://github.com/apolloadvice/cre8rflow-video-editor.git
+   cd cre8rflow-video-editor
+   ```
+
+2. **Install dependencies**
+   ```bash
+   # Frontend
+   cd frontend
+   npm install
+   
+   # Backend
+   cd ../backend
+   npm install
+   ```
+
+3. **Environment Setup**
+   
+   Create `.env` files in both frontend and backend directories:
+   
+   **Frontend `.env**:**
+   ```env
+   VITE_SUPABASE_URL=your_supabase_url
+   VITE_SUPABASE_ANON_KEY=your_supabase_anon_key
+   ```
+   
+   **Backend `.env**:**
+   ```env
+   SUPABASE_URL=your_supabase_url
+   SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
+   PORT=8000
+   ```
+
+4. **Database Setup**
+   
+   Run the SQL migrations in your Supabase dashboard:
+   ```sql
+   -- Create assets table
+   CREATE TABLE assets (
+     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+     name TEXT NOT NULL,
+     file_path TEXT NOT NULL,
+     file_size BIGINT,
+     type TEXT DEFAULT 'video',
+     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now())
+   );
+   
+   -- Enable RLS
+   ALTER TABLE assets ENABLE ROW LEVEL SECURITY;
+   
+   -- Create storage bucket
+   INSERT INTO storage.buckets (id, name, public) VALUES ('assets', 'assets', true);
+   ```
+
+5. **Start Development Servers**
+   ```bash
+   # Terminal 1 - Backend
+   cd backend
+   npm run dev
+   
+   # Terminal 2 - Frontend  
+   cd frontend
+   npm run dev
+   ```
+
+## 🎯 Usage
+
+### Basic Workflow
+
+1. **Upload Assets**: Drag video files into the Asset Panel
+2. **Create Timeline**: Drag assets from panel to timeline
+3. **Edit Clips**: Join, split, and arrange clips on timeline
+4. **Preview**: Use play controls to preview your edit
+5. **Export**: Generate final video output
+
+### Timeline Controls
+
+- **Play/Pause**: Spacebar or play button
+- **Seek**: Click anywhere on timeline
+- **Zoom**: Mouse wheel on timeline
+- **Join Clips**: Select adjacent clips and click join
+- **Split Clips**: Position cursor and use split tool
+
+### Debug Features
+
+- **Interval Tree Inspector**: Click settings button in video player
+- **Console Logging**: Comprehensive debug output for development
+- **Performance Monitoring**: Timeline update metrics
+
+## 🛠️ Technical Details
+
+### Interval Tree Implementation
+
+```typescript
+interface TimelineInterval {
+  start: number;
+  end: number;
+  clip: Clip;
+  videoUrl?: string;
+  loaded: boolean;
 }
-```
-Or for text overlay:
-```json
-{
-  "action": "add_text",
-  "start": 10,
-  "end": 15,
-  "text": "Welcome to the channel"
-}
-```
-Multiple actions can be represented as an array of such objects.
 
-### Robust Cut Command Handling (2024-06-15)
-- The system now robustly distinguishes between:
-  - **Trim:** "cut out the first/last N seconds" (removes from start/end, no gap)
-  - **Gap:** "cut from X to Y seconds" (removes a middle segment, leaves a gap in the timeline)
-- The backend and LLM prompt/schema have been updated to support both cases, and the timeline is updated accordingly.
-- See tests for both scenarios in `/backend/tests/test_command_executor.py`.
-
-### Asset Duration Handling
-- The backend always fetches the latest version of the asset from Supabase to determine duration.
-- Fallback to 60s only occurs if no asset is found; otherwise, the correct duration is used for all commands.
-
-## User Instructions (New)
-- **Type any natural language command describing your edit.**
-  - Examples:
-    - "Cut out the part where the guy in the grey quarter zip is talking."
-    - "Add title text from 10 to 15 that says 'Welcome to the channel'."
-    - "Overlay the logo from 5s to 10s."
-    - "Trim the first 5 seconds."
-    - "Remove the intro."
-- The system will interpret your intent and update the timeline accordingly.
-- If your command is ambiguous or cannot be understood, you'll receive a helpful error or feedback message.
-- Undo/redo and command history are supported for all edits.
-
-## Error Handling & Fallbacks
-- If the AI output is incomplete or ambiguous, the backend will not apply the edit and will return a clear error message.
-- If the OpenAI API is unreachable, a fallback parser may be used for simple commands, but this is not guaranteed.
-- All errors are handled gracefully, and the user is guided to rephrase or clarify as needed.
-
-## Extensibility
-- New command types and schema changes can be handled by updating the AI prompt and backend validation logic, not by writing new regexes.
-- The system is designed for future context-awareness (e.g., content tags, transcript integration) and collaborative editing.
-
-## Deprecated (Legacy) Approach
-- The previous spaCy/regex-based parser is deprecated and will be removed after migration is complete. All new features and bugfixes should target the AI-powered system.
-
-## Current Status (2024-06-10)
-- Core data structures (timeline, tracks, clips, effects, transitions) are robust, extensible, and fully tested.
-- Compound/nested clips are supported, with recursive timeline operations (trim, join, remove, move, transitions).
-- Serialization/deserialization is robust, versioned, and extensible (supports custom subclasses).
-- Command parsing, validation, and execution are robust and tested for all major command types.
-- **Parser and executor are now fully extensible and handler/plugin-based (2024-06-11).**
-- **Group/compound (batch) operations (e.g., group cut) are now implemented and tested (2024-06-11).**
-
-## Current Gaps & Limitations (2024-06-14)
-- **Asset Upload:** No persistent asset storage; missing metadata extraction (duration, resolution, etc.).
-- **Timeline Placement:** Drag-and-drop is incomplete; timeline does not visually represent clip duration or allow proper placement.
-- **NLP Command:** Command parsing is basic; lacks robust NLP, error handling, and feedback.
-- **Processing Feedback:** No visible "thinking" or step-by-step feedback for users.
-- **Edit Application:** Edits are not actually applied to timeline data or video; no real video processing or timeline update.
-- **Real-Time Update:** Timeline and video playback do not update after edits; no real-time preview of changes.
-- **Error Handling & UX:** Minimal error/confirmation messages; no user guidance for failed or ambiguous actions.
-
-## Features (Implemented, Partial, Planned)
-- **Implemented:**
-  - UI components for asset upload, timeline, and command input (not fully connected)
-  - Core timeline data structures (tracks, clips, effects, transitions)
-  - Command parser and executor scaffolding
-  - JSON serialization/deserialization
-- **Partially Implemented:**
-  - Asset upload UI (no metadata extraction or persistence)
-  - Timeline UI (drag-and-drop and clip creation incomplete)
-  - Command input and parsing (basic pattern matching only)
-- **Planned:**
-  - Persistent asset management and metadata extraction
-  - Functional drag-and-drop and timeline clip creation
-  - Robust NLP command parsing and mapping
-  - User feedback mechanisms (processing, confirmation, error)
-  - Real-time timeline and video updates after edits
-  - Integration of video processing backend
-
-## Intended End-to-End Workflow
-1. **Asset Upload:** User uploads a video to an asset library; system extracts and stores metadata (duration, resolution, etc.).
-2. **Timeline Placement:** User drags and drops video onto a timeline track, creating a clip with correct duration.
-3. **NLP Command:** User enters a natural-language command (e.g., "cut from 00:05 to 00:10").
-4. **Processing Feedback:** System provides visible feedback (e.g., "thinking...", step-by-step interpretation).
-5. **Apply Edit:** Edit is applied to the timeline and video.
-6. **Real-Time Update:** Timeline and video playback update immediately to reflect the edit.
-
-**Current State:** Steps 1-3 are partially present (UI only); steps 4-6 are not functional.
-
-## Next Steps / Roadmap (2024-06-14)
-- Implement persistent asset storage and metadata extraction
-- Complete drag-and-drop and timeline clip creation with correct scaling
-- Integrate robust NLP parser and map commands to timeline actions
-- Add user feedback mechanisms (processing, confirmation, error)
-- Implement timeline data updates and video processing backend
-- Enable real-time timeline and video updates after edits
-- Improve error handling and user guidance throughout the app
-
-## User Flow: Edit → Timeline Update → Preview → Export
-
-1. **Edit (Command or Manual UI):**
-   - The user issues a natural language command (e.g., "Cut clip1 at 00:30") or performs a manual edit in the UI.
-   - The command parser interprets the input and maps it to timeline operations (cut, trim, join, add effect, etc.).
-
-2. **Timeline Update:**
-   - The timeline data structure is updated to reflect the edit.
-   - All changes are non-destructive and versioned; the timeline can be serialized/deserialized for persistence.
-   - The UI (if present) is notified of changes and updates the visual timeline accordingly.
-
-3. **User-Initiated Preview:**
-   - The user can trigger a preview of the current timeline state (e.g., by clicking a "Preview" button).
-   - The backend generates a low-resolution, fast-rendered video preview using ffmpeg (or optionally MoviePy for prototyping).
-   - The preview is returned as a video file for UI playback, allowing the user to see edits in context before exporting.
-
-4. **Export:**
-   - When satisfied, the user triggers an export (e.g., by clicking an "Export" button).
-   - The backend uses the ffmpeg pipeline to render the full-quality video, applying all timeline edits, transitions, and effects.
-   - The exported video is returned for download or further processing.
-
-**Backend/API Support:**
-- The backend provides `/api/preview` and `/api/export` endpoints for preview and export, respectively.
-- Both endpoints accept the current timeline state as input and return a video file.
-- All timeline operations (cut, trim, join, transitions, effects) are supported in both preview and export flows.
-
-## Tech Stack
-- Python 3.8+
-- [spaCy](https://spacy.io/) (NLP, entity extraction)
-- Regex (command pattern matching and intent recognition)
-- [ffmpeg-python](https://github.com/kkroening/ffmpeg-python) (primary backend for video processing)
-- (Optional) [MoviePy](https://zulko.github.io/moviepy/) (for prototyping/preview only, not required for production or backend export)
-- (Optional, future) Hugging Face Transformers or Rasa for advanced intent classification
-
-## LLM (GPT) Command Parsing (Experimental)
-
-- The command parser can use OpenAI GPT (via API) to interpret natural language commands.
-- If enabled, the LLM is tried first; if ambiguous or fails, the system falls back to pattern-based parsing.
-- To enable LLM parsing:
-  1. Set the environment variable `OPENAI_API_KEY` to your OpenAI API key.
-  2. Instantiate the parser with `CommandParser(use_llm=True)`.
-- LLM parsing is fully tested with mocks; no real API calls are made during unit tests.
-- All errors and LLM responses are logged to `src/llm_parser.log`.
-
-### Example (Python):
-```python
-import os
-from src.command_parser import CommandParser
-os.environ["OPENAI_API_KEY"] = "sk-..."  # Set your key
-parser = CommandParser(use_llm=True)
-result = parser.parse_command("Cut clip1 at 00:30")
+// Binary search for clip at specific time
+const findIntervalAtTime = (time: number): TimelineInterval | null => {
+  return intervals.find(interval => 
+    time >= interval.start && time < interval.end
+  ) || null;
+};
 ```
 
-## Setup
+### Video Synchronization
 
-1. **Clone the repository:**
-   ```bash
-   git clone <repo-url>
-   cd <repo-directory>
-   ```
-2. **Create a virtual environment:**
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate
-   ```
-3. **Install dependencies:**
-   ```bash
-   pip install spacy
-   pip install ffmpeg-python
-   # Optional: for prototyping/preview only
-   pip install moviepy
-   ```
+```typescript
+// Smooth timeline progression
+const updateTimeline = useCallback(() => {
+  const video = videoRef.current;
+  if (!video || !playbackState.isPlaying) return;
 
-**Note:** MoviePy is only needed for prototyping or preview features. It is not required for production or backend export, which uses ffmpeg directly.
+  const newTimelineTime = playbackState.startTimelineTime + 
+    (performance.now() - playbackState.startTime) / 1000;
+  
+  // Find and switch to appropriate interval
+  const currentInterval = findIntervalAtTime(newTimelineTime);
+  if (currentInterval && currentInterval !== playbackState.currentInterval) {
+    switchToInterval(currentInterval, newTimelineTime);
+  }
+}, [/* dependencies */]);
+```
 
-## Running the Demo
+### Performance Optimizations
 
-The demo script shows how to parse and execute a sample command:
+- **Efficient Rendering**: React.memo and useMemo for expensive calculations
+- **Lazy Loading**: Videos loaded only when needed
+- **Debounced Updates**: Optimized timeline scrubbing
+- **Memory Management**: Cleanup of unused video resources
+
+## 🧪 Testing
 
 ```bash
-python src/demo.py
+# Run frontend tests
+cd frontend
+npm test
+
+# Run backend tests  
+cd backend
+npm test
+
+# Run integration tests
+npm run test:integration
 ```
 
-**Expected output:**
-```
-Loaded video: name=my_video, start=0.0, end=60.0
-Trimmed my_video at 30s: True
-Clip: name=my_video_part1, start=0.0, end=30.0
-Clip: name=my_video_part2, start=30.0, end=60.0
-Added transition between my_video_part1 and my_video_part2: True
-Transition: crossfade from my_video_part1 to my_video_part2, duration=2.0
-Joined my_video_part1 and my_video_part2: True
-Clip: name=my_video_part1_joined_my_video_part2, start=0.0, end=60.0
-Command: Cut clip1 at 00:30
-Parsed Operation: type=CUT, target=clip1, parameters={'timestamp': '00:30'}
-Execution Result: success=True, message=Cut operation on clip1 at 00:30
+## 📦 Build & Deployment
 
-Command: Add text 'Introduction' at the top from 0:05 to 0:15
-Parsed Operation: type=ADD_TEXT, target=None, parameters={'text': 'Introduction', 'position': 'top', 'start': '0:05', 'end': '0:15'}
-Execution Result: success=True, message=Add text 'Introduction' with params {'text': 'Introduction', 'position': 'top', 'start': '0:05', 'end': '0:15'}
+```bash
+# Build frontend
+cd frontend
+npm run build
+
+# Build backend
+cd backend  
+npm run build
+
+# Deploy (configure your hosting platform)
+npm run deploy
 ```
 
-## Project Structure
-- `src/command_parser.py` — NLP command parser
-- `src/timeline.py` — Timeline and clip data structures (including Effects track for timeline/range-based effects)
-- `src/command_executor.py` — Command-to-edit bridge
-- `src/demo.py` — Demo script
+## 🤝 Contributing
 
-## Timeline/Range-Based Effects (Effects Track)
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
-- Effects can be attached to individual clips (e.g., brightness, text overlay) or to the Effects track for global or range-based application.
-- Effects in the Effects track can specify `start` and `end` (in frames) to apply only to a portion of the timeline (future: range filtering).
-- All effects are composable and extensible via handler registration.
+### Development Guidelines
 
-### Example: Adding a Global Brightness Effect
+- Follow TypeScript strict mode
+- Use ESLint and Prettier for code formatting
+- Write unit tests for new features
+- Update documentation for API changes
+- Follow conventional commit messages
 
-```python
-from src.timeline import Timeline, Effect
+## 📝 License
 
-timeline = Timeline()
-# ... add video clips ...
-# Add a global brightness effect to the Effects track
-brightness_effect = Effect(effect_type="brightness", params={"value": 0.7})
-effects_track = [t for t in timeline.tracks if t.track_type == "effect"]
-effects_track[0].clips.append(brightness_effect)
-```
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-When exported, this will apply the brightness effect to the entire timeline.
+## 🔧 Troubleshooting
 
-## Testing
-- Standard parser unit tests: `tests/test_command_parser.py`
-- LLM parser and fallback logic: `tests/test_llm_parser.py`, `tests/test_command_parser_llm.py`
-- Run all tests:
-  ```bash
-  PYTHONPATH=src pytest
-  ```
-- LLM tests use mocking; no real API calls are made during testing.
+### Common Issues
 
-## Contributing
-See `PLANNING.md`
+**Video not loading:**
+- Check Supabase storage bucket permissions
+- Verify signed URL generation
+- Check browser console for errors
 
-## API Endpoints for UI Integration
+**Timeline playback stuttering:**
+- Enable hardware acceleration in browser
+- Check video encoding format compatibility
+- Monitor JavaScript console for performance warnings
 
-The backend exposes API endpoints for real-time timeline preview and export, ready for UI integration:
+**Clip joining issues:**
+- Ensure clips are adjacent on timeline
+- Check for overlapping time ranges
+- Verify clip selection state
 
-### POST /api/preview
-- **Description:** Generate a low-res/fast preview video for the given timeline state. Returns a video file for UI playback.
-- **Payload:**
-  ```json
-  {
-    "timeline": { /* Timeline as dict/JSON (see Timeline.to_dict()) */ }
-  }
-  ```
-- **Response:** `
+### Debug Mode
 
-### Timeline Placement & Overlap Prevention (2024-12-19)
+Enable debug mode by setting `VITE_DEBUG=true` in your environment file for detailed console logging.
 
-The timeline now includes robust clip placement functionality that prevents overlapping clips on the same track:
+## 📚 Documentation
 
-- **Smart Positioning**: When dragging assets from the asset panel to the timeline, the system automatically finds the best available position
-- **Overlap Prevention**: Clips cannot overlap on the same track - if a drop position conflicts with existing clips, the system finds the next available spot
-- **Gap Detection**: The system intelligently fills gaps between clips when possible, rather than always placing at the end
-- **Visual Feedback**: Drag operations show visual feedback including drop zone highlighting and position indicators
-- **Multi-Track Support**: Clips on different tracks can occupy the same timeline position without conflict
-- **User Notification**: Users are informed when clips are repositioned to avoid overlaps
+- [API Reference](docs/api.md)
+- [Architecture Guide](docs/architecture.md)
+- [Deployment Guide](docs/deployment.md)
+- [Contributing Guide](docs/contributing.md)
 
-#### Example Scenarios:
-- Drop at empty position → Clip placed at exact drop location
-- Drop overlapping existing clip → Clip placed after the overlapping clip
-- Drop with gap available → Clip placed in the gap if it fits
-- Drop on different track → No conflict, exact positioning maintained
+## 💬 Support
 
-This functionality ensures a smooth editing experience where users can quickly add clips without manually avoiding overlaps.
+- Create an [Issue](https://github.com/apolloadvice/cre8rflow-video-editor/issues) for bug reports
+- Join our [Discord](https://discord.gg/cre8rflow) for community support
+- Email: support@cre8rflow.com
 
-## User Instructions (New)
+## 🙏 Acknowledgments
+
+- [Supabase](https://supabase.com) for backend infrastructure
+- [shadcn/ui](https://ui.shadcn.com) for UI components
+- [Lucide React](https://lucide.dev) for icons
+- [Vite](https://vitejs.dev) for build tooling
+
+---
+
+**Built with ❤️ by the Cre8rFlow team**
