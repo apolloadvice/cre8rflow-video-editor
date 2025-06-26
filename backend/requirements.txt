@@ -1,0 +1,33 @@
+# Core API Framework
+fastapi>=0.104.1
+uvicorn[standard]>=0.24.0
+pydantic>=2.0.0
+
+# AI/NLP Dependencies
+openai>=1.0.0
+spacy>=3.7.0
+
+# Database and Storage
+supabase>=2.0.0
+sqlalchemy>=2.0.0
+
+# Environment and Configuration
+python-dotenv>=1.0.0
+
+# Video Processing (for future use)
+ffmpeg-python>=0.2.0
+
+# Utility Libraries
+requests>=2.31.0
+python-multipart>=0.0.6
+
+# Development and Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+
+# Logging and Monitoring
+structlog>=23.0.0
+
+# Data Processing
+numpy>=1.24.0
+pandas>=2.0.0

@@ -1,0 +1,86 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 9%;
+    --foreground: 0 0% 98%;
+
+    --card: 0 0% 11%;
+    --card-foreground: 0 0% 98%;
+
+    --popover: 0 0% 11%;
+    --popover-foreground: 0 0% 98%;
+
+    --primary: 252 47% 66%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 0 0% 18%;
+    --secondary-foreground: 0 0% 98%;
+
+    --muted: 0 0% 15%;
+    --muted-foreground: 0 0% 65%;
+
+    --accent: 252 47% 66%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 0 0% 20%;
+    --input: 0 0% 20%;
+    --ring: 252 47% 66%;
+
+    --radius: 0.5rem;
+  }
+
+  /* Main Background Gradient */
+  body {
+    background: #171717; /* Solid dark background instead of gradient */
+    background-attachment: fixed;
+  }
+
+  /* Custom scrollbar for our app */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  
+  ::-webkit-scrollbar-track {
+    @apply bg-cre8r-gray-800;
+  }
+  
+  ::-webkit-scrollbar-thumb {
+    @apply bg-cre8r-gray-600 rounded-full;
+  }
+  
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-cre8r-gray-500;
+  }
+
+  /* Remove focus outline for non-keyboard focus */
+  :focus:not(:focus-visible) {
+    outline: none;
+  }
+
+  /* Make focus outline visible for keyboard navigation */
+  :focus-visible {
+    @apply outline-none ring-2 ring-cre8r-violet;
+  }
+}
+
+#root {
+  width: 100%;
+  min-height: 100vh;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+@layer components {
+  .video-timeline-marker {
+    @apply bg-cre8r-violet/80 absolute rounded-sm cursor-pointer hover:bg-cre8r-violet transition-all;
+  }
+}
