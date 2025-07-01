@@ -23,8 +23,7 @@ export const performGlobalCleanup = () => {
     
     // Clear animation store timeouts
     debugLog('Clearing animation store timeouts');
-    const { clearAllTimeouts, clearCurrentAnimation } = useAnimationStore.getState();
-    clearAllTimeouts();
+    const { clearCurrentAnimation } = useAnimationStore.getState();
     clearCurrentAnimation();
     
     // Clear any remaining timeouts (brute force approach)

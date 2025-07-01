@@ -1,12 +1,13 @@
-import { useState, useRef, useEffect, forwardRef, useMemo } from "react";
+import { useState, useRef, useEffect, forwardRef, useMemo, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
-import { Play, Pause, Volume2, VolumeX, Download, Settings } from "lucide-react";
+import { Play, Pause, Volume2, VolumeX, Download, Settings, RefreshCw } from "lucide-react";
 import { cn } from "@/lib/utils";
 import UndoIcon from "@/components/icons/UndoIcon";
 import RedoIcon from "@/components/icons/RedoIcon";
 import { useEditorStore } from "@/store/editorStore";
-import { useIntervalTimeline } from "@/hooks/useIntervalTimeline";
+import { useTimelinePlayer } from "@/hooks/useTimelinePlayer";
+import { useGESPlayer } from "@/hooks/useGESPlayer";
 
 interface VideoPlayerProps {
   src?: string;
@@ -15,7 +16,7 @@ interface VideoPlayerProps {
   onDurationChange: (duration: number) => void;
   className?: string;
   rightControl?: React.ReactNode;
-  clips?: any[]; // Timeline clips for segment skipping and overlays
+  clips?: any[]; // Timeline clips for reference
 }
 
 const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
@@ -25,13 +26,16 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
   onDurationChange,
   className,
   rightControl,
-  clips = [], // timeline clips
+  clips = [],
 }, ref) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
   const [isControlsVisible, setIsControlsVisible] = useState(true);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [useGESMode, setUseGESMode] = useState(false); // Toggle between timeline and GES modes
   const controlsTimeoutRef = useRef<number | null>(null);
+  const lastToggleRef = useRef<number | null>(null);
   
   // Get undo/redo functions from store
   const { undo, redo, history } = useEditorStore();
@@ -39,36 +43,120 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
   // Use the forwarded ref or fall back to internal ref
   const resolvedRef = (ref as React.RefObject<HTMLVideoElement>) || videoRef;
   
-  // Use timeline playback hook
+  // Traditional timeline player system
   const {
     isPlaying: isTimelinePlaying,
-    currentInterval,
+    currentClip,
+    timelineClips,
     togglePlayback: toggleTimelinePlayback,
     stopPlayback: stopTimelinePlayback,
-    debugIntervals
-  } = useIntervalTimeline(resolvedRef);
+    startPlayback: startTimelinePlayback,
+    isReady: timelineReady
+  } = useTimelinePlayer(resolvedRef);
 
-  // Update video currentTime when prop changes (e.g., from timeline)
+  // GES player system
+  const {
+    isReady: gesReady,
+    isPlaying: gesIsPlaying,
+    isLoading: gesIsLoading,
+    hasTimeline: gesHasTimeline,
+    error: gesError,
+    togglePlayback: toggleGESPlayback,
+    seekToPosition: gesSeekToPosition,
+    isGESAvailable
+  } = useGESPlayer();
+
+  // Determine which player system to use
+  const activePlayer = useGESMode ? 'ges' : 'timeline';
+  const activeIsPlaying = useGESMode ? gesIsPlaying : isTimelinePlaying;
+  const activeIsReady = useGESMode ? gesReady : timelineReady;
+  const activeTogglePlayback = useGESMode ? toggleGESPlayback : toggleTimelinePlayback;
+
+  // Update video currentTime when prop changes (only for timeline mode)
   useEffect(() => {
+    if (useGESMode) return; // GES handles its own seeking
+    
     const video = resolvedRef.current;
-    if (video && Math.abs(video.currentTime - currentTime) > 0.5) {
-      video.currentTime = currentTime;
+    if (video && !isTimelinePlaying && Math.abs(video.currentTime - currentTime) > 0.5) {
+      // Only sync when not playing to avoid interference with timeline playback
+      const currentClipAtTime = timelineClips.find(clip => 
+        currentTime >= clip.start && currentTime < clip.end
+      );
+      
+      if (currentClipAtTime && currentClipAtTime.signedUrl) {
+        const clipPosition = currentTime - currentClipAtTime.start;
+        if (video.src !== currentClipAtTime.signedUrl) {
+          video.src = currentClipAtTime.signedUrl;
+          video.load();
+          video.currentTime = clipPosition;
+        } else {
+          video.currentTime = clipPosition;
+        }
+      }
     }
-  }, [currentTime, resolvedRef]);
+  }, [currentTime, resolvedRef, isTimelinePlaying, timelineClips, useGESMode]);
 
-  // Reload video when src changes (ensures proper sync with interval timeline)
-  useEffect(() => {
-    const video = resolvedRef.current;
-    if (video && src) {
-      console.log('🎥 [VideoPlayer] Video src changed, reloading:', src);
-      video.load(); // Explicitly reload the video element
+  // Handle seeking for GES mode
+  const handleSeek = async (position: number) => {
+    if (useGESMode && gesSeekToPosition) {
+      await gesSeekToPosition(position);
+    } else {
+      // Traditional timeline seeking is handled by the timeline player
+      onTimeUpdate(position);
     }
-  }, [src, resolvedRef]);
-
-  // Toggle play/pause - now uses timeline playback
-  const togglePlayPause = () => {
-    toggleTimelinePlayback();
   };
+
+  // Toggle play/pause
+  const togglePlayPause = async () => {
+    console.log(`🎮 [VideoPlayer] Toggle playback (${activePlayer} mode)`);
+    
+    if (useGESMode) {
+      await toggleGESPlayback();
+    } else {
+      if (timelineClips.length > 0) {
+        toggleTimelinePlayback();
+      } else {
+        // Fallback to regular video playback if no timeline clips
+        const video = resolvedRef.current;
+        if (!video) return;
+        
+        if (isPlaying) {
+          video.pause();
+          setIsPlaying(false);
+        } else {
+          video.play().catch(error => {
+            if (error.name !== 'AbortError') {
+              console.warn('Error playing video:', error);
+            }
+          });
+          setIsPlaying(true);
+        }
+      }
+    }
+  };
+
+  // Toggle between GES and Timeline modes with debouncing
+  const togglePlayerMode = useCallback(() => {
+    // Debounce to prevent rapid switching
+    const now = Date.now();
+    if (lastToggleRef.current && now - lastToggleRef.current < 500) {
+      return; // Ignore rapid clicks within 500ms
+    }
+    lastToggleRef.current = now;
+    
+    console.log(`🎮 [VideoPlayer] Switching from ${activePlayer} to ${useGESMode ? 'timeline' : 'ges'} mode`);
+    
+    // Stop any current playback before switching
+    if (activeIsPlaying) {
+      if (useGESMode) {
+        toggleGESPlayback();
+      } else {
+        stopTimelinePlayback();
+      }
+    }
+    
+    setUseGESMode(!useGESMode);
+  }, [activePlayer, useGESMode, activeIsPlaying, toggleGESPlayback, stopTimelinePlayback]);
 
   // Toggle mute
   const toggleMute = () => {
@@ -80,334 +168,302 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
   };
 
   // Handle volume change
-  const handleVolumeChange = (value: number[]) => {
-    const video = resolvedRef.current;
-    if (!video) return;
-    
-    const newVolume = value[0];
-    video.volume = newVolume;
+  const handleVolumeChange = (values: number[]) => {
+    const newVolume = values[0];
     setVolume(newVolume);
-    
-    if (newVolume === 0 && !isMuted) {
+    if (resolvedRef.current) {
+      resolvedRef.current.volume = newVolume;
+    }
+    if (newVolume === 0) {
       setIsMuted(true);
-      video.muted = true;
-    } else if (newVolume > 0 && isMuted) {
+    } else if (isMuted) {
       setIsMuted(false);
-      video.muted = false;
     }
   };
 
-  // Auto-hide controls after inactivity
+  // Show controls
   const showControls = () => {
     setIsControlsVisible(true);
-    
     if (controlsTimeoutRef.current) {
       window.clearTimeout(controlsTimeoutRef.current);
     }
-    
     controlsTimeoutRef.current = window.setTimeout(() => {
       setIsControlsVisible(false);
     }, 3000);
   };
 
-  // --- Timeline Segment & Overlay Logic ---
-  // Parse segments (video parts to play) and overlays (text/image)
-  const { segments, overlays } = useMemo(() => {
-    // Video segments: type is not 'text' or 'overlay'
-    const segments = clips
-      .filter((clip) => clip.type !== "text" && clip.type !== "overlay")
-      .map((clip) => ({ start: clip.start, end: clip.end }))
-      .sort((a, b) => a.start - b.start);
-    // Overlays: type is 'text' or 'overlay'
-    const overlays = clips
-      .filter((clip) => clip.type === "text" || clip.type === "overlay")
-      .map((clip) => ({ ...clip }));
-    return { segments, overlays };
-  }, [clips]);
-
-  // Helper: find the current segment index for a given time
-  const getCurrentSegmentIndex = (time: number) => {
-    return segments.findIndex(seg => time >= seg.start && time < seg.end);
-  };
-
-  // Helper: find the next segment index after a given time
-  const getNextSegmentIndex = (time: number) => {
-    return segments.findIndex(seg => seg.start > time);
-  };
-
-  // --- Segment Skipping Logic ---
+  // Setup video event listeners (only for timeline mode)
   useEffect(() => {
-    const video = resolvedRef.current;
-    if (!video || segments.length === 0 || isTimelinePlaying) return; // Skip segment handling in timeline mode
-
-    const handleTimeUpdate = () => {
-      const t = video.currentTime;
-      const segIdx = getCurrentSegmentIndex(t);
-      if (segIdx === -1) {
-        // Not in any segment: seek to next segment or pause
-        const nextIdx = getNextSegmentIndex(t);
-        if (nextIdx !== -1) {
-          video.currentTime = segments[nextIdx].start;
-        } else {
-          video.pause();
-          stopTimelinePlayback();
-        }
-      } else {
-        // In a segment: if at end, jump to next segment or pause
-        const seg = segments[segIdx];
-        if (t >= seg.end - 0.03) { // allow for floating point
-          const nextIdx = segIdx + 1;
-          if (nextIdx < segments.length) {
-            video.currentTime = segments[nextIdx].start;
-          } else {
-            video.pause();
-            stopTimelinePlayback();
-          }
-        }
-      }
-      // Only call onTimeUpdate if not in timeline mode (to avoid conflicts)
-      if (!isTimelinePlaying) {
-        onTimeUpdate(video.currentTime);
-      }
-    };
-
-    video.addEventListener("timeupdate", handleTimeUpdate);
-    return () => {
-      video.removeEventListener("timeupdate", handleTimeUpdate);
-    };
-  }, [resolvedRef, segments, onTimeUpdate, isTimelinePlaying, stopTimelinePlayback]);
-
-  // --- Start at first segment if needed ---
-  useEffect(() => {
-    const video = resolvedRef.current;
-    if (!video || segments.length === 0 || isTimelinePlaying) return; // Skip segment positioning in timeline mode
-    if (video.currentTime < segments[0].start || video.currentTime >= segments[0].end) {
-      video.currentTime = segments[0].start;
-    }
-  }, [resolvedRef, segments, isTimelinePlaying]);
-
-  // --- Overlay State ---
-  const [activeOverlays, setActiveOverlays] = useState<any[]>([]);
-
-  // Update overlays on timeupdate (use requestAnimationFrame for smoothness)
-  useEffect(() => {
-    let rafId: number;
-    const video = resolvedRef.current;
-    if (!video) return;
-    const updateOverlays = () => {
-      const t = video.currentTime;
-      const actives = overlays.filter(ovl => t >= ovl.start && t < ovl.end);
-      setActiveOverlays(actives);
-      rafId = requestAnimationFrame(updateOverlays);
-    };
-    rafId = requestAnimationFrame(updateOverlays);
-    return () => cancelAnimationFrame(rafId);
-  }, [overlays, resolvedRef]);
-
-  // Setup initial event listeners
-  useEffect(() => {
+    if (useGESMode) return; // GES mode doesn't need video element listeners
+    
     const video = resolvedRef.current;
     if (!video) return;
 
+    // Configure video for optimal playback
+    video.preload = 'metadata';
+    
     const handleTimeUpdate = () => {
-      // In timeline mode, let the timeline playback system handle time updates
-      if (!isTimelinePlaying) {
-        onTimeUpdate(video.currentTime);
-      }
+      onTimeUpdate(video.currentTime);
     };
 
     const handleDurationChange = () => {
-      onDurationChange(video.duration);
+      onDurationChange(video.duration || 0);
+    };
+
+    const handlePlay = () => {
+      setIsPlaying(true);
+    };
+
+    const handlePause = () => {
+      setIsPlaying(false);
     };
 
     const handleEnded = () => {
-      // Only stop timeline playback if we're not in timeline mode
-      // In timeline mode, let the timeline playback system handle transitions
-      if (!isTimelinePlaying) {
+      setIsPlaying(false);
+      // Stop timeline playback when video ends
+      if (isTimelinePlaying) {
         stopTimelinePlayback();
       }
     };
 
+    const handleLoadedMetadata = () => {
+      console.log('🎥 [VideoPlayer] Video metadata loaded:', {
+        duration: video.duration,
+        videoWidth: video.videoWidth,
+        videoHeight: video.videoHeight,
+        playbackRate: video.playbackRate
+      });
+    };
+
     video.addEventListener("timeupdate", handleTimeUpdate);
     video.addEventListener("durationchange", handleDurationChange);
+    video.addEventListener("play", handlePlay);
+    video.addEventListener("pause", handlePause);
     video.addEventListener("ended", handleEnded);
+    video.addEventListener("loadedmetadata", handleLoadedMetadata);
 
     showControls();
 
     return () => {
       video.removeEventListener("timeupdate", handleTimeUpdate);
       video.removeEventListener("durationchange", handleDurationChange);
+      video.removeEventListener("play", handlePlay);
+      video.removeEventListener("pause", handlePause);
       video.removeEventListener("ended", handleEnded);
+      video.removeEventListener("loadedmetadata", handleLoadedMetadata);
       
       if (controlsTimeoutRef.current) {
         window.clearTimeout(controlsTimeoutRef.current);
       }
     };
-  }, [onTimeUpdate, onDurationChange, resolvedRef, isTimelinePlaying, stopTimelinePlayback]);
+  }, [resolvedRef, onTimeUpdate, onDurationChange, isTimelinePlaying, stopTimelinePlayback, useGESMode]);
+
+  // Player status display
+  const getPlayerStatus = () => {
+    if (useGESMode) {
+      if (gesIsLoading) return "Creating GES timeline...";
+      if (gesError) return "GES Error - Check console for details";
+      if (!gesHasTimeline && clips && clips.length > 0) return "Building timeline...";
+      if (!gesHasTimeline) return "Ready to build timeline";
+      if (gesIsPlaying) return "Playing GES timeline";
+      return "GES timeline ready";
+    } else {
+      if (!timelineReady) return "Loading timeline player...";
+      if (timelineClips.length === 0) return "Add clips to begin";
+      if (isTimelinePlaying) {
+        if (currentClip) {
+          return `Playing: ${currentClip.name}`;
+        }
+        return "Timeline playing";
+      }
+      return `${timelineClips.length} clips ready`;
+    }
+  };
 
   return (
     <div 
-      className={cn("relative bg-black flex items-center justify-center", className)}
+      className={cn("relative bg-black flex flex-col", className)}
       onMouseMove={showControls}
+      onMouseEnter={showControls}
     >
-      {src ? (
-        <>
-          <video 
-            ref={resolvedRef}
-            className="max-h-full max-w-full"
-            src={src}
-            onClick={togglePlayPause}
-          >
-            Your browser does not support the video tag.
-          </video>
-          {/* Overlay Layer */}
-          <div className="pointer-events-none absolute inset-0 z-10">
-            {activeOverlays.map((ovl, i) => {
-              if (ovl.type === "text") {
-                // Use clip styling if available, otherwise use defaults
-                const clipStyle = ovl.style || {};
-                const fontSize = clipStyle.fontSize || '12px';
-                const position = clipStyle.position || 'bottom-third';
-                const backgroundColor = clipStyle.backgroundColor || 'transparent';
-                
-                // Position mapping
-                const positionClasses = {
-                  'bottom-center': 'bottom-4 left-1/2 transform -translate-x-1/2',
-                  'bottom-third': 'bottom-1/3 left-1/2 transform -translate-x-1/2',
-                  'center': 'top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2',
-                  'top': 'top-4 left-1/2 transform -translate-x-1/2',
-                  'bottom': 'bottom-4 left-1/2 transform -translate-x-1/2'
-                };
-                
-                return (
-                  <div 
-                    key={i} 
-                    className={`absolute text-white font-bold px-2 py-1 ${positionClasses[position] || positionClasses['bottom-third']}`}
-                    style={{
-                      fontSize: fontSize,
-                      backgroundColor: backgroundColor,
-                      color: clipStyle.color || '#ffffff',
-                      fontWeight: clipStyle.fontWeight || 'bold'
-                    }}
-                  >
-                    {ovl.text}
+      {/* Video Element - Hidden in GES mode but may still be used for some operations */}
+      <video
+        ref={resolvedRef}
+        src={src}
+        className={cn(
+          "w-full h-full object-contain",
+          useGESMode && "hidden" // Hide video element in GES mode
+        )}
+        onClick={togglePlayPause}
+      />
+
+      {/* GES Mode Preview */}
+      {useGESMode && (
+        <div className="w-full h-full flex items-center justify-center bg-gray-900 text-white relative">
+          <div className="text-center">
+            <div className="text-xl mb-4 flex items-center justify-center">
+              <div className="w-8 h-8 mr-3 flex-shrink-0">
+                {gesIsLoading ? (
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white"></div>
+                ) : gesIsPlaying ? (
+                  <div className="w-8 h-8 bg-green-500 rounded-full flex items-center justify-center">
+                    <Play className="h-4 w-4 text-white" />
                   </div>
-                );
-              } else if (ovl.type === "overlay") {
-                return <img key={i} src={ovl.asset} alt="overlay" className="max-h-1/2 max-w-1/2 object-contain" />;
-              }
-              return null;
-            })}
+                ) : gesHasTimeline ? (
+                  <div className="w-8 h-8 bg-blue-500 rounded-full flex items-center justify-center">
+                    <Pause className="h-4 w-4 text-white" />
+                  </div>
+                ) : (
+                  <div className="w-8 h-8 bg-gray-500 rounded-full flex items-center justify-center">
+                    <Settings className="h-4 w-4 text-white" />
+                  </div>
+                )}
+              </div>
+              GStreamer Preview
+            </div>
+            
+            <div className="text-sm text-gray-400 mb-2">{getPlayerStatus()}</div>
+            
+            {/* Timeline clips count when available */}
+            {clips && clips.length > 0 && (
+              <div className="text-xs text-gray-500 mb-2">
+                {clips.filter(c => c.type === 'video').length} video clips, {clips.filter(c => c.type === 'audio').length} audio clips
+              </div>
+            )}
+            
+            {/* GES Status Indicator */}
+            <div className="flex items-center justify-center space-x-2 text-xs">
+              <div className={`w-2 h-2 rounded-full ${isGESAvailable ? 'bg-green-400' : 'bg-red-400'}`}></div>
+              <span>{isGESAvailable ? 'GES Available' : 'GES Unavailable'}</span>
+            </div>
+            
+            {gesError && (
+              <div className="text-red-400 text-xs mt-4 max-w-md bg-red-900/20 p-3 rounded border border-red-500/30">
+                <div className="font-semibold mb-1">Error:</div>
+                {gesError}
+              </div>
+            )}
+            
+            {/* Help text when no clips or not ready */}
+            {!gesHasTimeline && !gesIsLoading && !gesError && (
+              <div className="text-xs text-gray-500 mt-4 max-w-md">
+                Add video clips to the timeline to enable GES preview mode
+              </div>
+            )}
           </div>
-        </>
-      ) : (
-        <div className="flex flex-col items-center justify-center text-cre8r-gray-400 h-full">
-          <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="mb-4 opacity-30"><path d="m10 7 5 3-5 3z"></path><rect width="20" height="14" x="2" y="3" rx="2"></rect><path d="M22 17v4"></path><path d="M2 17v4"></path></svg>
-          <p>No video selected</p>
-          <p className="text-sm mt-2">Upload or select a video to start editing</p>
         </div>
       )}
 
-      {/* Video controls overlay */}
+      {/* Video Controls */}
       <div 
         className={cn(
-          "absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent p-3 transition-opacity",
+          "absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent p-4 transition-opacity duration-300",
           isControlsVisible ? "opacity-100" : "opacity-0"
         )}
       >
-        {/* Updated control bar with centered play/pause and timecode */}
-        <div className="grid grid-cols-3 items-center mb-2">
-          {/* Left section - Undo/Redo */}
+        {/* Main Controls Row */}
+        <div className="flex items-center gap-3 mb-2">
+          {/* Play/Pause Button */}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={togglePlayPause}
+            disabled={useGESMode && gesIsLoading}
+            className="text-white hover:bg-white/20"
+          >
+            {activeIsPlaying ? (
+              <Pause className="h-4 w-4" />
+            ) : (
+              <Play className="h-4 w-4" />
+            )}
+          </Button>
+
+          {/* Player Mode Toggle */}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={togglePlayerMode}
+            className="text-white hover:bg-white/20 text-xs"
+            title={`Switch to ${useGESMode ? 'Timeline' : 'GES'} mode`}
+          >
+            {useGESMode ? 'GES' : 'TL'}
+          </Button>
+
+          {/* Volume Controls */}
           <div className="flex items-center gap-2">
-            {/* Undo button */}
             <Button
-              size="icon"
               variant="ghost"
-              className="h-8 w-8 text-white hover:bg-white/20 rounded-full"
-              onClick={undo}
-              disabled={history.past.length === 0}
+              size="sm"
+              onClick={toggleMute}
+              className="text-white hover:bg-white/20"
             >
-              <UndoIcon className="h-5 w-5" />
-            </Button>
-            
-            {/* Redo button */}
-            <Button
-              size="icon"
-              variant="ghost"
-              className="h-8 w-8 text-white hover:bg-white/20 rounded-full"
-              onClick={redo}
-              disabled={history.future.length === 0}
-            >
-              <RedoIcon className="h-5 w-5" />
-            </Button>
-          </div>
-          
-          {/* Center section - Play/Pause and Timecode */}
-          <div className="flex items-center justify-center gap-2">
-            {/* Play/Pause button */}
-            <Button
-              size="icon"
-              variant="ghost"
-              className="h-8 w-8 text-white hover:bg-white/20 rounded-full"
-              onClick={toggleTimelinePlayback}
-            >
-              {isTimelinePlaying ? (
-                <Pause className="h-5 w-5" />
+              {isMuted ? (
+                <VolumeX className="h-4 w-4" />
               ) : (
-                <Play className="h-5 w-5" />
+                <Volume2 className="h-4 w-4" />
               )}
             </Button>
-            
-            {/* Timecode display (rightControl) */}
-            {rightControl && <div>{rightControl}</div>}
+            <Slider
+              value={[isMuted ? 0 : volume]}
+              max={1}
+              step={0.1}
+              onValueChange={handleVolumeChange}
+              className="w-20"
+            />
           </div>
 
-          {/* Right section - Volume, Download, Settings */}
-          <div className="flex items-center justify-end gap-3">
-            <div className="flex items-center gap-2">
-              <Button
-                size="icon"
-                variant="ghost"
-                className="h-8 w-8 text-white hover:bg-white/20 rounded-full"
-                onClick={toggleMute}
-              >
-                {isMuted ? (
-                  <VolumeX className="h-5 w-5" />
-                ) : (
-                  <Volume2 className="h-5 w-5" />
-                )}
-              </Button>
-              <div className="w-20">
-                <Slider
-                  value={[isMuted ? 0 : volume]}
-                  min={0}
-                  max={1}
-                  step={0.01}
-                  onValueChange={handleVolumeChange}
-                  className="h-1"
-                />
-              </div>
-            </div>
+          {/* Status Display */}
+          <div className="flex-1 text-center">
+            <span className="text-white text-xs opacity-75">
+              {getPlayerStatus()}
+            </span>
+          </div>
 
+          {/* Undo/Redo Controls */}
+          <div className="flex items-center gap-1">
             <Button
-              size="icon"
               variant="ghost"
-              className="h-8 w-8 text-white hover:bg-white/20 rounded-full"
+              size="sm"
+              onClick={undo}
+              disabled={history.past.length === 0}
+              className="text-white hover:bg-white/20"
+              title="Undo"
             >
-              <Download className="h-5 w-5" />
+              <UndoIcon className="h-4 w-4" />
             </Button>
-            
             <Button
-              size="icon"
               variant="ghost"
-              className="h-8 w-8 text-white hover:bg-white/20 rounded-full"
-              onClick={debugIntervals}
-              title="Debug Interval Tree"
+              size="sm"
+              onClick={redo}
+              disabled={history.future.length === 0}
+              className="text-white hover:bg-white/20"
+              title="Redo"
             >
-              <Settings className="h-5 w-5" />
+              <RedoIcon className="h-4 w-4" />
             </Button>
           </div>
+
+          {/* Right Control Slot */}
+          {rightControl}
         </div>
+
+        {/* Timestamp Display (Timeline mode only) */}
+        {!useGESMode && (
+          <div className="flex justify-end">
+            <span className="text-white text-xs font-mono">
+              {String(Math.floor(currentTime / 3600)).padStart(2, '0')}:
+              {String(Math.floor((currentTime % 3600) / 60)).padStart(2, '0')}:
+              {String(Math.floor(currentTime % 60)).padStart(2, '0')}
+            </span>
+          </div>
+        )}
+
+        {/* GES Mode Info */}
+        {useGESMode && (
+          <div className="text-center text-white text-xs opacity-75">
+            GES Preview Mode - Timeline controlled by GStreamer
+          </div>
+        )}
       </div>
     </div>
   );

@@ -12,7 +12,6 @@ const Playhead: React.FC<PlayheadProps> = ({ timelineRef }) => {
   const setCurrentTime = useEditorStore(state => state.setCurrentTime);
   
   const [isDragging, setIsDragging] = useState(false);
-  const requestRef = useRef<number>();
   const positionRef = useRef<number>(0);
   
   const updatePlayheadPosition = () => {
@@ -55,20 +54,9 @@ const Playhead: React.FC<PlayheadProps> = ({ timelineRef }) => {
     };
   }, [isDragging, duration, setCurrentTime, timelineRef]);
   
-  // Animate playhead using requestAnimationFrame
+  // Update playhead position when currentTime changes (no need for continuous animation)
   useEffect(() => {
-    const animate = () => {
-      updatePlayheadPosition();
-      requestRef.current = requestAnimationFrame(animate);
-    };
-    
-    requestRef.current = requestAnimationFrame(animate);
-    
-    return () => {
-      if (requestRef.current) {
-        cancelAnimationFrame(requestRef.current);
-      }
-    };
+    updatePlayheadPosition();
   }, [currentTime, duration]);
   
   const playheadPosition = updatePlayheadPosition();

@@ -304,3 +304,37 @@ Multiple actions can be represented as an array of such objects.
 - Add richer context-awareness (e.g., content tags, transcript integration) to support commands like "cut out the part where the guy in the grey quarter zip is talking."
 - Enable collaborative editing and real-time sync as needed.
 - Continue to expand the schema and prompt as new editing features are added.
+
+## Timeline Calculation
+
+- **Clip Added** → `useVideoHandler.ts` calls `recalculateDuration()`
+- **Duration Calculated** → `Math.max(...clips.map(clip => clip.end))` finds the timeline end
+- **Interval Tree Built** → `buildIntervals()` creates the binary search tree
+- **URLs Preloaded** → All video signed URLs are generated and cached
+- **Timeline Ready** → The timeline immediately knows the full extent and all intervals
+
+## Timeline Architecture Summary
+
+- **📊 Duration**: Calculated immediately as the maximum end time of all clips
+- **🌳 Interval Tree**: Built immediately with O(log n) binary search
+- **🔗 URLs**: All video URLs preloaded immediately
+- **⚡ Performance**: Instant timeline scrubbing and playback transitions
+- **🎯 Precision**: Frame-accurate positioning and switching
+
+The timeline **already calculates the end time immediately** after videos are placed! The duration appears at the right end of the timeline scrubber, and you can:
+
+- ✅ **Click anywhere** on the full timeline extent
+- ✅ **Drag cursor** to any position from 0s to the end of the last clip  
+- ✅ **Play continuously** through all clips seamlessly
+- ✅ **Scrub precisely** with binary search interval lookup
+
+Is there a specific issue you're experiencing with the timeline end calculation, or were you looking for additional visual feedback when the timeline extent changes?
+
+## Timeline Calculation
+
+- Rebuild intervals when clips change
+- useEffect(() => {
+  buildIntervals().catch(error => {
+    console.error('🌳 [IntervalTree] Error building intervals:', error);
+  });
+}, [buildIntervals]);

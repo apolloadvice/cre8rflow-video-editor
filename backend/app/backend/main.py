@@ -9,10 +9,18 @@ load_dotenv(dotenv_path=env_path)
 print("DEBUG OPENAI_API_KEY:", os.getenv("OPENAI_API_KEY"))
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.backend.preview_api import router as preview_router
 from app.backend.timeline_api import router as timeline_router
 from app.backend.command_api import router as command_router
 from app.backend.upload_api import router as upload_router
+
+# Try to import GES API with error handling
+try:
+    from app.backend.ges_api import router as ges_router
+    GES_ROUTER_AVAILABLE = True
+    print("✅ GES router loaded successfully")
+except Exception as e:
+    GES_ROUTER_AVAILABLE = False
+    print(f"⚠️ GES router disabled due to import error: {e}")
 
 app = FastAPI()
 
@@ -30,9 +38,6 @@ app.add_middleware(
 def read_root():
     return {"status": "ok"}
 
-# Include the preview API router
-app.include_router(preview_router, prefix="/api")
-
 # Include the timeline API router
 app.include_router(timeline_router, prefix="/api")
 
@@ -40,4 +45,11 @@ app.include_router(timeline_router, prefix="/api")
 app.include_router(command_router, prefix="/api")
 
 # Include the upload API router
-app.include_router(upload_router, prefix="/api") 
+app.include_router(upload_router, prefix="/api")
+
+# Include the GES API router if available
+if GES_ROUTER_AVAILABLE:
+    app.include_router(ges_router, prefix="/api")
+    print("✅ GES endpoints registered")
+else:
+    print("⚠️ GES endpoints skipped") 

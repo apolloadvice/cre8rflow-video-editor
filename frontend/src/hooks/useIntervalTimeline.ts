@@ -131,7 +131,7 @@ export const useIntervalTimeline = (videoRef: React.RefObject<HTMLVideoElement>)
     return null;
   }, [intervals]);
 
-  // Load video for an interval (simplified since URLs are preloaded)
+  // Load video for an interval (simplified - just checks if URL is ready)
   const loadInterval = useCallback(async (interval: TimelineInterval): Promise<boolean> => {
     const clipId = interval.clip.id;
     
@@ -140,7 +140,7 @@ export const useIntervalTimeline = (videoRef: React.RefObject<HTMLVideoElement>)
       return loadingPromises.current.get(clipId)!;
     }
 
-    console.log(`📼 [VideoLoader] Loading interval: ${interval.clip.name}`);
+    console.log(`📼 [VideoLoader] Checking interval: ${interval.clip.name}`);
 
     const loadPromise = (async () => {
       try {
@@ -150,53 +150,17 @@ export const useIntervalTimeline = (videoRef: React.RefObject<HTMLVideoElement>)
           return false;
         }
 
-        // Load video into element
+        // Just verify video element exists - actual loading handled in timeline update
         if (videoRef.current) {
-          return new Promise<boolean>((resolve) => {
-            const video = videoRef.current!;
-
-            const handleLoadedData = () => {
-              video.removeEventListener('loadeddata', handleLoadedData);
-              video.removeEventListener('error', handleError);
-              interval.loaded = true;
-              console.log(`📼 [VideoLoader] ✅ Loaded ${interval.clip.name}`);
-              console.log(`📼 [VideoLoader] Video ready state:`, {
-                readyState: video.readyState,
-                duration: video.duration,
-                src: video.src ? video.src.substring(0, 80) + '...' : 'None'
-              });
-              resolve(true);
-            };
-
-            const handleError = () => {
-              video.removeEventListener('loadeddata', handleLoadedData);
-              video.removeEventListener('error', handleError);
-              console.error(`📼 [VideoLoader] ❌ Failed to load ${interval.clip.name}`);
-              resolve(false);
-            };
-
-            console.log(`📼 [VideoLoader] Adding event listeners for ${interval.clip.name}`);
-            video.addEventListener('loadeddata', handleLoadedData);
-            video.addEventListener('error', handleError);
-
-            console.log(`📼 [VideoLoader] Setting video src to: ${interval.videoUrl.substring(0, 80)}...`);
-            setVideoSrc(interval.videoUrl);
-            video.src = interval.videoUrl;
-            
-            console.log(`📼 [VideoLoader] Calling video.load() for ${interval.clip.name}`);
-            video.load();
-            
-            console.log(`📼 [VideoLoader] Video element after load() call:`, {
-              src: video.src ? video.src.substring(0, 80) + '...' : 'None',
-              readyState: video.readyState,
-              networkState: video.networkState
-            });
-          });
+          console.log(`📼 [VideoLoader] ✅ URL ready for ${interval.clip.name}`);
+          interval.loaded = true;
+          return true;
         }
 
+        console.error(`📼 [VideoLoader] No video element available`);
         return false;
       } catch (error) {
-        console.error(`📼 [VideoLoader] Error loading ${interval.clip.name}:`, error);
+        console.error(`📼 [VideoLoader] Error checking ${interval.clip.name}:`, error);
         return false;
       } finally {
         loadingPromises.current.delete(clipId);
@@ -205,7 +169,7 @@ export const useIntervalTimeline = (videoRef: React.RefObject<HTMLVideoElement>)
 
     loadingPromises.current.set(clipId, loadPromise);
     return loadPromise;
-  }, [videoRef, setVideoSrc]);
+  }, [videoRef]);
 
   // Start timeline playback
   const startPlayback = useCallback(async () => {
@@ -218,24 +182,61 @@ export const useIntervalTimeline = (videoRef: React.RefObject<HTMLVideoElement>)
     if (currentInterval) {
       console.log(`▶️ [Timeline] Found interval: ${currentInterval.clip.name}`);
       
-      // Load the current interval
-      const loaded = await loadInterval(currentInterval);
-      if (!loaded) {
-        console.error(`▶️ [Timeline] Failed to load initial interval`);
+      // Check if URL is ready
+      if (!currentInterval.videoUrl) {
+        console.error(`▶️ [Timeline] No video URL for ${currentInterval.clip.name}`);
         return;
       }
 
-      // Set video position within the clip
-      const clipPosition = currentTime - currentInterval.start;
-      if (videoRef.current) {
-        videoRef.current.currentTime = clipPosition;
+      // Check if we're resuming the same video (pause/resume case)
+      const resumingSameVideo = playbackState.currentInterval && 
+                                playbackState.currentInterval.clip.id === currentInterval.clip.id &&
+                                videoRef.current && 
+                                videoRef.current.src === currentInterval.videoUrl;
+
+      if (resumingSameVideo) {
+        // Just resume playing the current video without reloading
+        console.log(`▶️ [Timeline] Resuming playback of: ${currentInterval.clip.name}`);
+        const clipPosition = currentTime - currentInterval.start;
         
-        try {
-          await videoRef.current.play();
-        } catch (error) {
-          if (error.name !== 'AbortError') {
-            console.warn('Error starting video playback:', error);
-          }
+        if (videoRef.current) {
+          videoRef.current.currentTime = clipPosition;
+          console.log(`▶️ [Timeline] Resuming at position ${clipPosition.toFixed(2)}s`);
+          videoRef.current.play().catch(error => {
+            if (error.name !== 'AbortError') {
+              console.warn('Error resuming video playback:', error);
+            }
+          });
+        }
+      } else {
+        // Load new video or initial start
+        if (videoRef.current) {
+          console.log(`▶️ [Timeline] Setting up initial video: ${currentInterval.clip.name}`);
+          
+          // Set video source
+          setVideoSrc(currentInterval.videoUrl);
+          videoRef.current.src = currentInterval.videoUrl;
+          videoRef.current.load();
+          
+          // Wait for video to be ready then start playback
+          const handleCanPlay = () => {
+            if (videoRef.current) {
+              videoRef.current.removeEventListener('canplay', handleCanPlay);
+              
+              // Set position within the clip
+              const clipPosition = currentTime - currentInterval.start;
+              videoRef.current.currentTime = clipPosition;
+              
+              console.log(`▶️ [Timeline] Starting playback at position ${clipPosition.toFixed(2)}s`);
+              videoRef.current.play().catch(error => {
+                if (error.name !== 'AbortError') {
+                  console.warn('Error starting video playback:', error);
+                }
+              });
+            }
+          };
+          
+          videoRef.current.addEventListener('canplay', handleCanPlay);
         }
       }
 
@@ -255,11 +256,11 @@ export const useIntervalTimeline = (videoRef: React.RefObject<HTMLVideoElement>)
         setTimeout(() => startPlayback(), 50);
       }
     }
-  }, [currentTime, findIntervalAtTime, loadInterval, intervals, videoRef, playbackState.isPlaying]);
+  }, [currentTime, findIntervalAtTime, intervals, videoRef, playbackState.isPlaying, playbackState.currentInterval, setVideoSrc]);
 
   // Stop timeline playback
   const stopPlayback = useCallback(() => {
-    console.log(`⏸️ [Timeline] Stopping playback`);
+    console.log(`⏸️ [Timeline] Stopping playback at timeline position: ${currentTime.toFixed(2)}s`);
     
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
@@ -270,11 +271,13 @@ export const useIntervalTimeline = (videoRef: React.RefObject<HTMLVideoElement>)
       videoRef.current.pause();
     }
 
+    // Preserve current interval when pausing - DON'T reset it
     setPlaybackState(prev => ({
       ...prev,
       isPlaying: false
+      // Keep currentInterval so we resume from the right video
     }));
-  }, [videoRef]);
+  }, [videoRef, currentTime]);
 
   // Toggle playback
   const togglePlayback = useCallback(() => {
@@ -293,8 +296,8 @@ export const useIntervalTimeline = (videoRef: React.RefObject<HTMLVideoElement>)
       const elapsed = (Date.now() - playbackState.startTime) / 1000;
       const newTimelineTime = playbackState.timelineStartPosition + elapsed;
 
-      // Update timeline cursor
-      setCurrentTime(Math.min(newTimelineTime, duration));
+      // Update timeline cursor smoothly
+      setCurrentTime(newTimelineTime);
 
       // Check if we've reached the end
       if (newTimelineTime >= duration) {
@@ -315,60 +318,108 @@ export const useIntervalTimeline = (videoRef: React.RefObject<HTMLVideoElement>)
            console.log(`🔄 [Timeline] Video src will change from:`, videoRef.current?.src);
            console.log(`🔄 [Timeline] Video src will change to:`, currentInterval.videoUrl);
            
-           // Update state immediately to prevent duplicate switches
-           setPlaybackState(prev => ({
-             ...prev,
-             currentInterval
-           }));
-           
-           // Load new interval asynchronously
-           loadInterval(currentInterval).then(loaded => {
-             console.log(`🔄 [Timeline] Load result for ${currentInterval.clip.name}: ${loaded}`);
-             if (loaded && videoRef.current) {
-               const clipPosition = newTimelineTime - currentInterval.start;
-               console.log(`🔄 [Timeline] Setting video position to ${clipPosition.toFixed(2)}s in ${currentInterval.clip.name}`);
-               console.log(`🔄 [Timeline] Video element state before position set:`, {
-                 src: videoRef.current.src ? videoRef.current.src.substring(0, 80) + '...' : 'None',
-                 readyState: videoRef.current.readyState,
-                 duration: videoRef.current.duration,
-                 currentTime: videoRef.current.currentTime.toFixed(2),
-                 paused: videoRef.current.paused
-               });
-               
-               // Wait a bit for the video to be ready
-               setTimeout(() => {
-                 if (videoRef.current) {
-                   videoRef.current.currentTime = clipPosition;
-                   videoRef.current.play().catch(error => {
-                     if (error.name !== 'AbortError') {
-                       console.warn('Error playing video:', error);
-                     }
-                   });
-                   
-                   console.log(`🔄 [Timeline] After setting position:`, {
-                     currentTime: videoRef.current.currentTime.toFixed(2),
-                     paused: videoRef.current.paused
-                   });
-                 }
-               }, 100);
-             } else {
-               console.warn(`🔄 [Timeline] Failed to load interval or no video ref:`, {
-                 loaded,
-                 hasVideoRef: !!videoRef.current,
-                 intervalName: currentInterval.clip.name
-               });
-             }
-           }).catch(error => {
-             console.error(`🔄 [Timeline] Error loading interval ${currentInterval.clip.name}:`, error);
-           });
+           // Switch video immediately and synchronously
+           if (currentInterval.videoUrl && videoRef.current) {
+             // At clip boundary - detailed logging
+             const previousClipName = playbackState.currentInterval?.clip.name || 'None';
+             console.log(`🔄 Switching from ${previousClipName} to ${currentInterval.clip.name} at ${newTimelineTime.toFixed(2)}s`);
+             
+             // Update state immediately to prevent interference
+             setPlaybackState(prev => ({
+               ...prev,
+               currentInterval
+             }));
+             
+             // Update store video source for reactive components
+             setVideoSrc(currentInterval.videoUrl);
+             
+             // Calculate position within the new clip
+             const clipPosition = newTimelineTime - currentInterval.start;
+             
+             // 1. Set new source immediately
+             console.log(`🔄 [Step 1] Setting new source immediately: ${currentInterval.videoUrl.split('/').pop()?.split('?')[0]}`);
+             videoRef.current.src = currentInterval.videoUrl;
+             
+             // 2. Load the new video
+             console.log(`🔄 [Step 2] Loading new video with load()`);
+             videoRef.current.load();
+             
+             // 3. Set position immediately (will be approximate until video loads)
+             console.log(`🔄 [Step 3] Setting position to ${clipPosition.toFixed(2)}s immediately`);
+             videoRef.current.currentTime = clipPosition;
+             
+             // 4. Ensure consistent playback rate before attempting to play
+             console.log(`🔄 [Step 4] Setting playback rate to 1.0 before attempting play`);
+             videoRef.current.playbackRate = 1.0;
+             
+             // 5. Try to play immediately (may fail until loaded, that's OK)
+             console.log(`🔄 [Step 5] Attempting to resume playback immediately`);
+             videoRef.current.play().catch(error => {
+               // This is expected to fail initially, we'll retry when loaded
+               console.log(`🔄 [Info] Initial play failed (expected): ${error.name}`);
+             });
+             
+             // 6. Set up load handlers for when video is actually ready
+             const handleLoadSuccess = () => {
+               if (videoRef.current && playbackState.isPlaying) {
+                 videoRef.current.removeEventListener('loadeddata', handleLoadSuccess);
+                 videoRef.current.removeEventListener('canplay', handleLoadSuccess);
+                 
+                 // Re-sync position and ensure playback continues
+                 const currentTimelineTime = playbackState.timelineStartPosition + (Date.now() - playbackState.startTime) / 1000;
+                 const updatedClipPosition = currentTimelineTime - currentInterval.start;
+                 
+                 console.log(`🔄 [Step 6] Video loaded, re-syncing position to ${updatedClipPosition.toFixed(2)}s`);
+                 videoRef.current.currentTime = updatedClipPosition;
+                 
+                 // Ensure playback rate is correct after loading
+                 videoRef.current.playbackRate = 1.0;
+                 
+                 videoRef.current.play().catch(error => {
+                   if (error.name !== 'AbortError') {
+                     console.warn('Error playing loaded video:', error);
+                   }
+                 });
+                 
+                 console.log(`✅ Successfully loaded and synced ${currentInterval.clip.name}`);
+               }
+             };
+             
+             videoRef.current.addEventListener('loadeddata', handleLoadSuccess);
+             videoRef.current.addEventListener('canplay', handleLoadSuccess);
+             
+             console.log(`✅ Initiated switch to ${currentInterval.clip.name} (loading in background)`);
+           } else {
+             console.error(`🔄 [Timeline] Cannot switch - missing videoUrl or videoRef`, {
+               hasUrl: !!currentInterval.videoUrl,
+               hasVideoRef: !!videoRef.current
+             });
+           }
                   } else {
-           // Same interval, sync video position
+           // Same interval, sync video position and ensure correct playback rate
            const clipPosition = newTimelineTime - currentInterval.start;
            if (videoRef.current) {
-             const drift = Math.abs(videoRef.current.currentTime - clipPosition);
-             if (drift > 0.2) { // Increased threshold to avoid unnecessary seeks
-               console.log(`🔄 [Timeline] Syncing video position - drift: ${drift.toFixed(3)}s`);
-               videoRef.current.currentTime = clipPosition;
+             const video = videoRef.current;
+             const drift = Math.abs(video.currentTime - clipPosition);
+             
+             // Ensure playback rate is always correct during sync
+             if (video.playbackRate !== 1.0) {
+               console.log(`🔄 [Timeline] Correcting playback rate from ${video.playbackRate} to 1.0 during sync`);
+               video.playbackRate = 1.0;
+             }
+             
+             if (drift > 2.0) { // Much higher threshold to avoid excessive sync corrections
+               console.log(`🔄 [Timeline] Syncing video position - drift: ${drift.toFixed(3)}s (playback rate: ${video.playbackRate})`);
+               console.log(`🔄 [Debug] Sync details:`, {
+                 timelineTime: newTimelineTime.toFixed(3),
+                 currentInterval: currentInterval.clip.name,
+                 intervalStart: currentInterval.start.toFixed(3),
+                 expectedPosition: clipPosition.toFixed(3),
+                 actualVideoTime: video.currentTime.toFixed(3),
+                 playbackRate: video.playbackRate,
+                 videoSrc: video.src.split('/').pop()?.split('?')[0]
+               });
+               video.currentTime = clipPosition;
              }
            }
          }
@@ -403,11 +454,10 @@ export const useIntervalTimeline = (videoRef: React.RefObject<HTMLVideoElement>)
     playbackState.timelineStartPosition,
     playbackState.currentInterval,
     findIntervalAtTime,
-    loadInterval,
-    setCurrentTime,
     stopPlayback,
     duration,
-    videoRef
+    videoRef,
+    setVideoSrc
   ]);
 
   // Rebuild intervals when clips change

@@ -61,23 +61,25 @@ const EditorContent = ({ isAssetPanelVisible = true }: EditorContentProps) => {
     }, 800)
   ).current;
 
-  // Animation frame for syncing video time with store
-  useEffect(() => {
-    let animationFrameId: number;
-    
-    const updateTime = () => {
-      if (videoRef.current) {
-        setCurrentTime(videoRef.current.currentTime);
-      }
-      animationFrameId = requestAnimationFrame(updateTime);
-    };
-    
-    animationFrameId = requestAnimationFrame(updateTime);
-    
-    return () => {
-      cancelAnimationFrame(animationFrameId);
-    };
-  }, [setCurrentTime]);
+  // Animation frame for syncing video time with store - DISABLED
+  // This was causing dual cursor issues when using interval timeline
+  // The interval timeline now controls the cursor position directly
+  // useEffect(() => {
+  //   let animationFrameId: number;
+  //   
+  //   const updateTime = () => {
+  //     if (videoRef.current) {
+  //       setCurrentTime(videoRef.current.currentTime);
+  //     }
+  //     animationFrameId = requestAnimationFrame(updateTime);
+  //   };
+  //   
+  //   animationFrameId = requestAnimationFrame(updateTime);
+  //   
+  //   return () => {
+  //     cancelAnimationFrame(animationFrameId);
+  //   };
+  // }, [setCurrentTime]);
 
   // Auto-recalculate timeline duration when clips change
   useEffect(() => {

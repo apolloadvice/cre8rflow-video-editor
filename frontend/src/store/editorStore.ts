@@ -344,15 +344,6 @@ export const useKeyboardShortcuts = () => {
   const { undo, redo, deleteClip, selectedClipId, setSelectedClipId } = useEditorStore();
   
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
-    // Debug: Log every keydown event
-    console.log('[KeyboardShortcuts] KeyDown event:', {
-      key: e.key,
-      ctrl: e.ctrlKey,
-      meta: e.metaKey,
-      shift: e.shiftKey,
-      selectedClipId,
-      activeElement: document.activeElement?.tagName,
-    });
     // Prevent shortcuts if typing in an input, textarea, or contenteditable
     const active = document.activeElement;
     if (
@@ -365,24 +356,30 @@ export const useKeyboardShortcuts = () => {
     ) {
       return;
     }
+    
     // Undo: Ctrl/Cmd + Z
     if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
       console.log('[KeyboardShortcuts] Undo triggered');
       e.preventDefault();
       undo();
+      return;
     }
+    
     // Redo: Ctrl/Cmd + Shift + Z or Ctrl/Cmd + Y
     if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
       console.log('[KeyboardShortcuts] Redo triggered');
       e.preventDefault();
       redo();
+      return;
     }
+    
     // Delete selected clip: Backspace or Delete key
     if ((e.key === 'Backspace' || e.key === 'Delete') && selectedClipId) {
       console.log('[KeyboardShortcuts] Delete triggered for:', selectedClipId);
       e.preventDefault();
       deleteClip(selectedClipId);
       setSelectedClipId(null);
+      return;
     }
   }, [undo, redo, deleteClip, selectedClipId, setSelectedClipId]);
   
