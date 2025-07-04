@@ -1,9 +1,10 @@
-import { Film, Save } from "lucide-react";
+import { Film, Save, FileVideo } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import UndoIcon from "@/components/icons/UndoIcon";
 import RedoIcon from "@/components/icons/RedoIcon";
 import { useToast } from "@/hooks/use-toast";
 import { useEditorStore } from "@/store/editorStore";
+import ExportDialog from "@/components/editor/ExportDialog";
 import React, { useState, useRef } from "react";
 
 interface EditorToolbarProps {
@@ -12,9 +13,10 @@ interface EditorToolbarProps {
 
 const EditorToolbar = ({ activeVideoName }: EditorToolbarProps) => {
   const { toast } = useToast();
-  const { undo, redo, history, projectName, setProjectName } = useEditorStore();
+  const { undo, redo, history, projectName, setProjectName, clips } = useEditorStore();
   const [editing, setEditing] = useState(false);
   const [tempName, setTempName] = useState(projectName);
+  const [isExportDialogOpen, setIsExportDialogOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const handleSaveProject = () => {
@@ -24,11 +26,16 @@ const EditorToolbar = ({ activeVideoName }: EditorToolbarProps) => {
     });
   };
 
-  const handleRenderVideo = () => {
-    toast({
-      title: "Rendering started",
-      description: "Your video is now being rendered",
-    });
+  const handleOpenExport = () => {
+    if (clips.length === 0) {
+      toast({
+        title: "No Content",
+        description: "Add clips to your timeline before exporting",
+        variant: "destructive"
+      });
+      return;
+    }
+    setIsExportDialogOpen(true);
   };
 
   const handleNameClick = () => {
@@ -115,11 +122,20 @@ const EditorToolbar = ({ activeVideoName }: EditorToolbarProps) => {
         
         <Button
           className="bg-cre8r-violet hover:bg-cre8r-violet-dark"
-          onClick={handleRenderVideo}
+          onClick={handleOpenExport}
         >
-          Render Video
+          <FileVideo className="h-4 w-4 mr-2" />
+          Export Video
         </Button>
       </div>
+      
+      {/* Professional Export Dialog */}
+      <ExportDialog
+        isOpen={isExportDialogOpen}
+        onOpenChange={setIsExportDialogOpen}
+        timeline={{ clips, projectName }}
+        duration={clips.reduce((max, clip) => Math.max(max, clip.end), 0)}
+      />
     </div>
   );
 };

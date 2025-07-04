@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useEditorStore } from '@/store/editorStore';
+import { supabase } from '@/integrations/supabase/client';
 
 interface GESClip {
   id: string;
@@ -61,12 +62,11 @@ export const useGESPlayer = () => {
   const pollIntervalRef = useRef<number>();
   const isInitialized = useRef(false);
 
-  // Convert editor clips to GES format with validation
-  const convertClipsToGES = useCallback((clips: any[]): GESClip[] => {
+  // Convert editor clips to GES format with validation and signed URLs
+  const convertClipsToGES = useCallback(async (clips: any[]): Promise<GESClip[]> => {
     console.log(`🎬 [GES] Converting ${clips.length} clips to GES format`);
     
-    const validClips = clips
-      .filter(clip => {
+    const validClips = clips.filter(clip => {
         // Validate clip type
         if (!['video', 'audio'].includes(clip.type)) {
           console.log(`🎬 [GES] Skipping clip ${clip.name}: unsupported type ${clip.type}`);
@@ -86,26 +86,51 @@ export const useGESPlayer = () => {
         }
         
         return true;
-      })
-      .map(clip => {
+    });
+
+    // Create signed URLs for all valid clips
+    const gesClips: GESClip[] = [];
+    
+    for (const clip of validClips) {
+      try {
+        console.log(`🎬 [GES] Creating signed URL for ${clip.name} (${clip.file_path})`);
+        
+        // Create signed URL from Supabase storage path
+        const { data: urlData, error } = await supabase.storage
+          .from('assets')
+          .createSignedUrl(clip.file_path, 3600); // 1 hour expiry
+        
+        if (error || !urlData?.signedUrl) {
+          console.error(`🎬 [GES] ❌ Failed to create signed URL for ${clip.name}:`, error);
+          continue; // Skip this clip
+        }
+
+        const signedUrl = urlData.signedUrl;
+        console.log(`🎬 [GES] ✅ Created signed URL for ${clip.name}: ${signedUrl.substring(0, 80)}...`);
+        
         const gesClip: GESClip = {
           id: clip.id,
           name: clip.name,
           start: clip.start,
           end: clip.end,
           duration: clip.end - clip.start,
-          file_path: clip.file_path,
+          file_path: signedUrl, // Use signed HTTPS URL instead of storage path!
           type: clip.type,
           in_point: 0.0
         };
         
         console.log(`🎬 [GES] Converted clip: ${gesClip.name} (${gesClip.start}s-${gesClip.end}s)`);
-        return gesClip;
-      })
-      .sort((a, b) => a.start - b.start);
+        gesClips.push(gesClip);
+        
+      } catch (error) {
+        console.error(`🎬 [GES] ❌ Error processing clip ${clip.name}:`, error);
+        continue; // Skip this clip
+      }
+    }
     
-    console.log(`🎬 [GES] Successfully converted ${validClips.length} valid clips`);
-    return validClips;
+    const sortedClips = gesClips.sort((a, b) => a.start - b.start);
+    console.log(`🎬 [GES] Successfully converted ${sortedClips.length} valid clips with signed URLs`);
+    return sortedClips;
   }, []);
 
   // Make API request to GES backend
@@ -145,7 +170,8 @@ export const useGESPlayer = () => {
     try {
       setPlayerState(prev => ({ ...prev, isLoading: true, error: null }));
       
-      const gesClips = convertClipsToGES(clips);
+      console.log('🎬 [GES] Converting clips to signed URLs...');
+      const gesClips = await convertClipsToGES(clips);
       
       if (gesClips.length === 0) {
         console.log('🎬 [GES] No valid clips to create timeline');
@@ -162,6 +188,7 @@ export const useGESPlayer = () => {
       // Log clip details for debugging
       gesClips.forEach((clip, index) => {
         console.log(`🎬 [GES] Clip ${index + 1}: ${clip.name} (${clip.type}) - ${clip.start}s to ${clip.end}s (${clip.duration}s)`);
+        console.log(`🎬 [GES] Clip ${index + 1} URL: ${clip.file_path.substring(0, 80)}...`);
       });
 
       const timelineConfig = { ...DEFAULT_CONFIG, ...config };

@@ -15,7 +15,7 @@ export function useGeneratePreview() {
     } catch (err: any) {
       let errorMsg = err.message || "Unknown error";
       if (err.response && err.response.data) {
-        let data = err.response.data;
+        const data = err.response.data;
         if (data instanceof Blob) {
           try {
             const text = await data.text();

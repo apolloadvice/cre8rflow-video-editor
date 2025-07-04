@@ -22,6 +22,42 @@ except Exception as e:
     GES_ROUTER_AVAILABLE = False
     print(f"⚠️ GES router disabled due to import error: {e}")
 
+# Try to import Projects API with error handling
+try:
+    from app.backend.projects_api import router as projects_router
+    PROJECTS_ROUTER_AVAILABLE = True
+    print("✅ Projects router loaded successfully")
+except Exception as e:
+    PROJECTS_ROUTER_AVAILABLE = False
+    print(f"⚠️ Projects router disabled due to import error: {e}")
+
+# Try to import Effects API with error handling
+try:
+    from app.backend.effects_api import router as effects_router
+    EFFECTS_ROUTER_AVAILABLE = True
+    print("✅ Effects router loaded successfully")
+except Exception as e:
+    EFFECTS_ROUTER_AVAILABLE = False
+    print(f"⚠️ Effects router disabled due to import error: {e}")
+
+# Try to import Export API with error handling
+try:
+    from app.backend.export_api import router as export_router
+    EXPORT_ROUTER_AVAILABLE = True
+    print("✅ Export router loaded successfully")
+except Exception as e:
+    EXPORT_ROUTER_AVAILABLE = False
+    print(f"⚠️ Export router disabled due to import error: {e}")
+
+# Try to import Performance API with error handling
+try:
+    from app.backend.performance_api import router as performance_router
+    PERFORMANCE_ROUTER_AVAILABLE = True
+    print("✅ Performance router loaded successfully")
+except Exception as e:
+    PERFORMANCE_ROUTER_AVAILABLE = False
+    print(f"⚠️ Performance router disabled due to import error: {e}")
+
 app = FastAPI()
 
 # Add CORS middleware
@@ -53,3 +89,31 @@ if GES_ROUTER_AVAILABLE:
     print("✅ GES endpoints registered")
 else:
     print("⚠️ GES endpoints skipped") 
+
+# Include the Projects API router if available
+if PROJECTS_ROUTER_AVAILABLE:
+    app.include_router(projects_router, prefix="/api")
+    print("✅ Projects endpoints registered")
+else:
+    print("⚠️ Projects endpoints skipped") 
+
+# Include the Effects API router if available
+if EFFECTS_ROUTER_AVAILABLE:
+    app.include_router(effects_router, prefix="/api")
+    print("✅ Effects endpoints registered")
+else:
+    print("⚠️ Effects endpoints skipped") 
+
+# Include the Export API router if available
+if EXPORT_ROUTER_AVAILABLE:
+    app.include_router(export_router, prefix="/api")
+    print("✅ Export endpoints registered")
+else:
+    print("⚠️ Export endpoints skipped") 
+
+# Include the Performance API router if available
+if PERFORMANCE_ROUTER_AVAILABLE:
+    app.include_router(performance_router, prefix="/api")
+    print("✅ Performance endpoints registered")
+else:
+    print("⚠️ Performance endpoints skipped") 

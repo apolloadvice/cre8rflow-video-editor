@@ -265,7 +265,7 @@ const AssetPanel = ({ onVideoSelect }: AssetPanelProps) => {
       let isResolved = false;
       let timeoutId: NodeJS.Timeout | null = null;
       
-      let cleanup = () => {
+      const cleanup = () => {
         if (timeoutId) {
           clearTimeout(timeoutId);
           timeoutId = null;

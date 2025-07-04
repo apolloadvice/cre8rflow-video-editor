@@ -16,8 +16,9 @@ const Editor = () => {
   // Integrate thumbnails hook
   const { thumbnailData } = useThumbnails(activeVideoAsset?.id);
 
-  // State for asset panel visibility
+  // State for panel visibility
   const [isAssetPanelVisible, setIsAssetPanelVisible] = useState(true);
+  const [isEffectsPanelVisible, setIsEffectsPanelVisible] = useState(false);
 
   // Toggle asset panel visibility
   const toggleAssetPanel = () => {
@@ -29,10 +30,24 @@ const Editor = () => {
     });
   };
 
-  // Debug: Log when asset panel visibility changes
+  // Toggle effects panel visibility
+  const toggleEffectsPanel = () => {
+    console.log('🔄 [Editor] Effects panel toggle requested. Current state:', isEffectsPanelVisible);
+    setIsEffectsPanelVisible(prev => {
+      const newState = !prev;
+      console.log('🔄 [Editor] Effects panel visibility changed to:', newState);
+      return newState;
+    });
+  };
+
+  // Debug: Log when panel visibility changes
   useEffect(() => {
     console.log('📋 [Editor] Asset panel visibility state changed:', isAssetPanelVisible);
   }, [isAssetPanelVisible]);
+
+  useEffect(() => {
+    console.log('✨ [Editor] Effects panel visibility state changed:', isEffectsPanelVisible);
+  }, [isEffectsPanelVisible]);
 
   return (
     <div className="flex flex-col h-screen bg-cre8r-dark text-white">
@@ -43,13 +58,18 @@ const Editor = () => {
           <EditorSidebar 
             onVideoIconClick={toggleAssetPanel}
             isAssetPanelVisible={isAssetPanelVisible}
+            onEffectsIconClick={toggleEffectsPanel}
+            isEffectsPanelVisible={isEffectsPanelVisible}
           />
         </div>
         
         {/* Main content area - takes remaining space */}
         <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
           <EditorToolbar activeVideoName={activeVideoAsset?.name} />
-          <EditorContent isAssetPanelVisible={isAssetPanelVisible} />
+          <EditorContent 
+            isAssetPanelVisible={isAssetPanelVisible} 
+            isEffectsPanelVisible={isEffectsPanelVisible}
+          />
         </div>
       </div>
     </div>

@@ -5,7 +5,8 @@ import {
   Music, 
   Image, 
   MessageSquare, 
-  Layers
+  Layers,
+  Wand2
 } from 'lucide-react';
 
 interface SidebarItem {
@@ -17,18 +18,21 @@ interface SidebarItem {
 interface EditorSidebarProps {
   onVideoIconClick?: () => void;
   isAssetPanelVisible?: boolean;
+  onEffectsIconClick?: () => void;
+  isEffectsPanelVisible?: boolean;
 }
 
 const sidebarItems: SidebarItem[] = [
   { id: 'video', label: 'Video', icon: Video },
   { id: 'text', label: 'Text', icon: Type },
+  { id: 'effects', label: 'Effects', icon: Wand2 },
   { id: 'sounds', label: 'Sounds', icon: Music },
   { id: 'media', label: 'Media', icon: Image },
   { id: 'captions', label: 'Captions', icon: MessageSquare },
   { id: 'layers', label: 'Layers', icon: Layers },
 ];
 
-const EditorSidebar = ({ onVideoIconClick, isAssetPanelVisible = true }: EditorSidebarProps) => {
+const EditorSidebar = ({ onVideoIconClick, isAssetPanelVisible = true, onEffectsIconClick, isEffectsPanelVisible = false }: EditorSidebarProps) => {
   const [selectedItem, setSelectedItem] = useState('video');
 
   return (
@@ -41,19 +45,25 @@ const EditorSidebar = ({ onVideoIconClick, isAssetPanelVisible = true }: EditorS
           const Icon = item.icon;
           const isSelected = selectedItem === item.id;
           const isVideoIcon = item.id === 'video';
+          const isEffectsIcon = item.id === 'effects';
           
           // Handle click based on item type
           const handleClick = () => {
             if (isVideoIcon && onVideoIconClick) {
               onVideoIconClick();
               // Don't change selected state when toggling asset panel
+            } else if (isEffectsIcon && onEffectsIconClick) {
+              onEffectsIconClick();
+              // Don't change selected state when toggling effects panel
             } else {
               setSelectedItem(item.id);
             }
           };
           
-          // For video icon, only show as "selected/active" if asset panel is actually visible
-          const shouldShowAsActive = isSelected && (!isVideoIcon || isAssetPanelVisible);
+          // For video and effects icons, only show as "selected/active" if respective panel is actually visible
+          const shouldShowAsActive = isSelected && 
+            (!isVideoIcon || isAssetPanelVisible) && 
+            (!isEffectsIcon || isEffectsPanelVisible);
           
           if (shouldShowAsActive) {
             return (

@@ -16,13 +16,13 @@ const findNextAvailablePosition = (clips: any[], track: number, startTime: numbe
     .sort((a, b) => a.start - b.start);
   
   // Try the originally requested position first
-  let proposedClip = {
+  const proposedClip = {
     start: startTime,
     end: startTime + clipDuration
   };
   
   // Check if this position overlaps with any existing clip
-  let hasOverlap = trackClips.some(existingClip => clipsOverlap(proposedClip, existingClip));
+  const hasOverlap = trackClips.some(existingClip => clipsOverlap(proposedClip, existingClip));
   
   if (!hasOverlap) {
     return startTime; // Original position is fine

@@ -13,7 +13,7 @@ export function useJoinClips() {
     setError(null);
     // Find the clips by id if not already in payload
     let clip_id = payload.clip_id;
-    let second_clip_id = payload.second_clip_id;
+    const second_clip_id = payload.second_clip_id;
     // Try to infer from selectedClipId if not provided
     if (!clip_id && selectedClipId) {
       clip_id = selectedClipId;

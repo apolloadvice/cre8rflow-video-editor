@@ -4,26 +4,47 @@ import VideoPlayer from "@/components/editor/VideoPlayer";
 import Timeline from "@/components/editor/Timeline";
 import ChatPanel from "@/components/editor/ChatPanel";
 import AssetPanel from "@/components/editor/AssetPanel";
+import EffectsSidebar from "@/components/editor/EffectsSidebar";
 import TimecodeDisplay from "@/components/editor/TimecodeDisplay";
-import { useEditorStore, useLayoutSetter, useLayout } from "@/store/editorStore";
+import GESProjectSelector from "@/components/editor/GESProjectSelector";
+import LayerManager from "@/components/editor/LayerManager";
+import { useEditorStore, useLayoutSetter, useLayout, useCurrentGESProjectId, LayerType } from "@/store/editorStore";
 import { useVideoHandler } from "@/hooks/useVideoHandler";
 import { useAICommands } from "@/hooks/useAICommands";
 import { saveTimeline } from "@/api/apiClient";
 import { useToast } from "@/hooks/use-toast";
 import { debounce } from "lodash";
 import { supabase } from "@/integrations/supabase/client";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Settings, Grid } from "lucide-react";
 
 interface EditorContentProps {
   isAssetPanelVisible?: boolean;
+  isEffectsPanelVisible?: boolean;
 }
 
-const EditorContent = ({ isAssetPanelVisible = true }: EditorContentProps) => {
+const EditorContent = ({ isAssetPanelVisible = true, isEffectsPanelVisible = false }: EditorContentProps) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
   
   // Get layout state and setter
   const layout = useLayout();
   const setLayoutSize = useLayoutSetter();
+  
+  // GES Professional Timeline State
+  const currentGESProjectId = useCurrentGESProjectId();
+  const [gesMode, setGesMode] = useState(false);
+  const [selectedLayer, setSelectedLayer] = useState<LayerType>(LayerType.MAIN);
+  const [showLayerManager, setShowLayerManager] = useState(false);
+  
+  // Auto-enable GES mode when a project is loaded
+  useEffect(() => {
+    if (currentGESProjectId && !gesMode) {
+      setGesMode(true);
+      setShowLayerManager(true);
+    }
+  }, [currentGESProjectId, gesMode]);
   
   // Get state from our store
   const {
@@ -176,6 +197,28 @@ const EditorContent = ({ isAssetPanelVisible = true }: EditorContentProps) => {
   const handleTimelineResize = (sizes: number[]) => {
     setLayoutSize('timeline', sizes[1]);
   };
+  
+  // GES Professional Timeline Handlers
+  const handleGESModeToggle = (enabled: boolean) => {
+    setGesMode(enabled);
+    if (enabled) {
+      setShowLayerManager(true);
+    }
+  };
+  
+  const handleLayerSelect = (layer: LayerType) => {
+    setSelectedLayer(layer);
+  };
+  
+  const handleGESProjectChange = (projectId: string | null) => {
+    if (projectId) {
+      setGesMode(true);
+      setShowLayerManager(true);
+    } else {
+      setGesMode(false);
+      setShowLayerManager(false);
+    }
+  };
 
   // Handler for video selection from AssetPanel
   const handleVideoSelect = async (video: any) => {
@@ -233,6 +276,22 @@ const EditorContent = ({ isAssetPanelVisible = true }: EditorContentProps) => {
         {isAssetPanelVisible && (
           <div className="w-1 bg-cre8r-gray-700 hover:bg-cre8r-violet transition-colors cursor-col-resize" />
         )}
+
+        {/* Effects sidebar - conditionally render but preserve state */}
+        <div 
+          className={`transition-all duration-200 ${
+            isEffectsPanelVisible 
+              ? 'w-1/4 min-w-[300px] opacity-100' 
+              : 'w-0 opacity-0 overflow-hidden'
+          }`}
+        >
+          <EffectsSidebar />
+        </div>
+        
+        {/* Resizer handle - only show when effects panel is visible */}
+        {isEffectsPanelVisible && (
+          <div className="w-1 bg-cre8r-gray-700 hover:bg-cre8r-violet transition-colors cursor-col-resize" />
+        )}
         
         {/* Main content area with nested panel groups */}
         <div className="flex-1 min-w-0 overflow-hidden">
@@ -267,7 +326,7 @@ const EditorContent = ({ isAssetPanelVisible = true }: EditorContentProps) => {
                 {/* Divider between preview and chat */}
                 <ResizableHandle withHandle className="bg-cre8r-gray-700 hover:bg-cre8r-violet transition-colors" />
                 
-                {/* Chat panel */}
+                {/* Right panel: Chat only */}
                 <ResizablePanel 
                   defaultSize={layout.chat} 
                   minSize={20}
@@ -289,20 +348,98 @@ const EditorContent = ({ isAssetPanelVisible = true }: EditorContentProps) => {
               defaultSize={layout.timeline} 
               minSize={15}
             >
-              <Timeline
-                ref={timelineRef}
-                duration={duration}
-                currentTime={currentTime}
-                onTimeUpdate={setCurrentTime}
-                clips={clips}
-                onClipSelect={setSelectedClipId}
-                selectedClipId={selectedClipId}
-                onVideoDrop={handleVideoDrop}
-                onVideoAssetDrop={handleVideoAssetDrop}
-                onMultipleVideoAssetDrop={handleMultipleVideoAssetDrop}
-                onClipUpdate={handleClipUpdate}
-                onClipMove={handleClipMove}
-              />
+              <div className="h-full flex flex-col">
+                {/* Professional Timeline Header */}
+                <div className="bg-cre8r-gray-900 border-b border-cre8r-gray-700 p-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-4">
+                      <h3 className="text-sm font-medium text-white">Timeline</h3>
+                      {gesMode && (
+                        <Badge className="bg-cre8r-violet/20 text-cre8r-violet border-cre8r-violet/30">
+                          Professional Mode
+                        </Badge>
+                      )}
+                      {currentGESProjectId && (
+                        <Badge variant="outline" className="border-green-500/30 text-green-400">
+                          GES Project Active
+                        </Badge>
+                      )}
+                    </div>
+                    
+                    <div className="flex items-center gap-2">
+                      {gesMode && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setShowLayerManager(!showLayerManager)}
+                          className={`border-cre8r-gray-600 text-cre8r-gray-300 hover:bg-cre8r-gray-700 ${
+                            showLayerManager ? 'bg-cre8r-gray-700' : ''
+                          }`}
+                        >
+                          <Grid className="h-4 w-4 mr-1" />
+                          Layers
+                        </Button>
+                      )}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleGESModeToggle(!gesMode)}
+                        className="border-cre8r-gray-600 text-cre8r-gray-300 hover:bg-cre8r-gray-700"
+                      >
+                        <Settings className="h-4 w-4 mr-1" />
+                        {gesMode ? 'Classic Mode' : 'Pro Mode'}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Timeline Content Area */}
+                <div className="flex-1 flex overflow-hidden">
+                  {/* GES Project Selector and Layer Manager Sidebar */}
+                  {(gesMode || currentGESProjectId) && (
+                    <div className="w-80 bg-cre8r-gray-800 border-r border-cre8r-gray-700 flex flex-col">
+                      {/* GES Project Selector */}
+                      <div className="p-3">
+                        <GESProjectSelector 
+                          onProjectChange={handleGESProjectChange}
+                        />
+                      </div>
+                      
+                      {/* Layer Manager */}
+                      {showLayerManager && currentGESProjectId && (
+                        <div className="flex-1 p-3 overflow-auto">
+                          <LayerManager
+                            onLayerSelect={handleLayerSelect}
+                            selectedLayer={selectedLayer}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Timeline Component */}
+                  <div className="flex-1 overflow-hidden">
+                    <Timeline
+                      ref={timelineRef}
+                      duration={duration}
+                      currentTime={currentTime}
+                      onTimeUpdate={setCurrentTime}
+                      clips={clips}
+                      onClipSelect={setSelectedClipId}
+                      selectedClipId={selectedClipId}
+                      onVideoDrop={handleVideoDrop}
+                      onVideoAssetDrop={handleVideoAssetDrop}
+                      onMultipleVideoAssetDrop={handleMultipleVideoAssetDrop}
+                      onClipUpdate={handleClipUpdate}
+                      onClipMove={handleClipMove}
+                      gesMode={gesMode}
+                      onGESModeToggle={handleGESModeToggle}
+                      onLayerSelect={handleLayerSelect}
+                      selectedLayer={selectedLayer}
+                    />
+                  </div>
+                </div>
+              </div>
             </ResizablePanel>
           </ResizablePanelGroup>
         </div>
