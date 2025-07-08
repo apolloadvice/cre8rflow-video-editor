@@ -46,30 +46,40 @@ const AssetPanel = ({ onVideoSelect }: AssetPanelProps) => {
     try {
       console.log("Starting fetchAndSyncAssets...");
       
-      // 1. Fetch registered assets
-      const res = await fetch("/api/assets/list");
-      if (!res.ok) throw new Error("Failed to fetch assets");
-      const assets = await res.json();
-      console.log("Registered assets:", assets);
+      // 1. Try to fetch registered assets, but don't fail if this doesn't work
+      let assets: any[] = [];
+      try {
+        const res = await fetch("/api/assets/list", { 
+          signal: AbortSignal.timeout(5000) // 5 second timeout
+        });
+        if (res.ok) {
+          assets = await res.json();
+          console.log("Registered assets:", assets);
+        } else {
+          console.warn("Failed to fetch registered assets, using storage files only");
+        }
+      } catch (error) {
+        console.warn("Assets API unavailable, using storage files only:", error);
+      }
       
       // 2. Fetch files from Supabase Storage bucket 'assets'
       console.log("Fetching storage files...");
       const { data: storageFiles, error: storageError } = await supabase.storage.from("assets").list("user123", { limit: 1000 });
       if (storageError) {
         console.error("Storage error:", storageError);
-        // Don't throw here, continue with just registered assets
-        console.log("Continuing with registered assets only due to storage error");
-      } else {
-        console.log("Storage files:", storageFiles);
+        throw new Error(`Storage error: ${storageError.message}`);
       }
+      
+      console.log("Storage files:", storageFiles);
       
       const registeredPaths = new Set(assets.map((a: any) => a.path));
       console.log("Registered paths:", Array.from(registeredPaths));
       
       // 3. Find files not in the registered assets (auto-register missing files)
-      const missingFiles = storageFiles?.filter((f: any) => 
-        f.name.endsWith(".mp4") || f.name.endsWith(".mov") || f.name.endsWith(".avi")
-      ).filter((f: any) => !registeredPaths.has(`user123/${f.name}`)) || [];
+      const missingFiles = storageFiles?.filter((f: any) => {
+        const name = f.name.toLowerCase();
+        return name.endsWith(".mp4") || name.endsWith(".mov") || name.endsWith(".avi");
+      }).filter((f: any) => !registeredPaths.has(`user123/${f.name}`)) || [];
       
       console.log("Missing files to auto-register:", missingFiles);
       
@@ -115,17 +125,22 @@ const AssetPanel = ({ onVideoSelect }: AssetPanelProps) => {
             
             console.log("Extracted metadata for auto-registration:", metadata);
             
-            const registerRes = await fetch("/api/assets/register", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(metadata)
-            });
-            
-            if (registerRes.ok) {
-              console.log(`Successfully auto-registered ${file.name}`);
-              autoRegisteredCount++;
-            } else {
-              console.error(`Failed to auto-register ${file.name}`);
+            try {
+              const registerRes = await fetch("/api/assets/register", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(metadata),
+                signal: AbortSignal.timeout(5000) // 5 second timeout for registration too
+              });
+              
+              if (registerRes.ok) {
+                console.log(`Successfully auto-registered ${file.name}`);
+                autoRegisteredCount++;
+              } else {
+                console.warn(`Failed to auto-register ${file.name} - proceeding without registration`);
+              }
+            } catch (registerError) {
+              console.warn(`Registration API unavailable for ${file.name} - proceeding without registration:`, registerError);
             }
           } catch (error) {
             console.error(`Error auto-registering ${file.name}:`, error);
@@ -137,16 +152,45 @@ const AssetPanel = ({ onVideoSelect }: AssetPanelProps) => {
       let updatedAssets = assets;
       if (autoRegisteredCount > 0) {
         console.log(`Re-fetching assets after auto-registering ${autoRegisteredCount} files...`);
-        const updatedRes = await fetch("/api/assets/list");
-        if (updatedRes.ok) {
-          updatedAssets = await updatedRes.json();
-          console.log("Updated assets after auto-registration:", updatedAssets);
+        try {
+          const updatedRes = await fetch("/api/assets/list", { 
+            signal: AbortSignal.timeout(5000) 
+          });
+          if (updatedRes.ok) {
+            updatedAssets = await updatedRes.json();
+            console.log("Updated assets after auto-registration:", updatedAssets);
+          }
+        } catch (error) {
+          console.warn("Could not re-fetch assets after registration, using original list:", error);
         }
+      }
+      
+      // 6. If no registered assets available, create asset objects directly from storage files
+      if (updatedAssets.length === 0 && storageFiles) {
+        console.log("No registered assets available, creating assets from storage files directly...");
+        const videoFiles = storageFiles.filter((f: any) => {
+          const name = f.name.toLowerCase();
+          return name.endsWith(".mp4") || name.endsWith(".mov") || name.endsWith(".avi");
+        });
+        
+        updatedAssets = videoFiles.map((file: any) => ({
+          id: file.id,
+          path: `user123/${file.name}`,
+          original_name: file.name,
+          duration: 0, // Will be extracted during thumbnail generation
+          width: 1920, // Default values
+          height: 1080,
+          size: file.metadata?.size || 0,
+          mimetype: file.metadata?.mimetype || "video/mp4",
+          updated_at: file.updated_at || new Date().toISOString()
+        }));
+        
+        console.log(`Created ${updatedAssets.length} asset objects from storage files`);
       }
       
       console.log(`Processing ${updatedAssets.length} assets for thumbnails...`);
       
-      // 6. Generate thumbnails and video URLs for assets (with better error handling)
+      // 7. Generate thumbnails and video URLs for assets (with better error handling)
       const mapped = await Promise.allSettled(updatedAssets.map(async (a: any) => {
         console.log(`Processing asset: ${a.original_name || a.path}`);
         
@@ -169,13 +213,21 @@ const AssetPanel = ({ onVideoSelect }: AssetPanelProps) => {
           console.error(`Error creating signed URL for ${a.path}:`, e);
         }
         
-        // Generate thumbnail from video if URL is available
+        // Generate thumbnail and extract metadata from video if URL is available
         let thumbnail = ""; // Start with empty - no fallback thumbnails as requested
+        let extractedDuration = a.duration || 0; // Use existing duration as fallback
+        let extractedWidth = a.width || 1920;
+        let extractedHeight = a.height || 1080;
+        
         if (videoUrl) {
           try {
-            console.log(`Generating thumbnail for ${a.original_name || a.path}...`);
-            thumbnail = await generateVideoThumbnail(videoUrl);
-            console.log(`✅ Generated thumbnail for ${a.original_name || a.path}`);
+            console.log(`Generating thumbnail and extracting metadata for ${a.original_name || a.path}...`);
+            const result = await generateVideoThumbnailWithMetadata(videoUrl);
+            thumbnail = result.thumbnail;
+            extractedDuration = result.duration;
+            extractedWidth = result.width;
+            extractedHeight = result.height;
+            console.log(`✅ Generated thumbnail and extracted metadata for ${a.original_name || a.path}: ${extractedDuration}s, ${extractedWidth}x${extractedHeight}`);
           } catch (e) {
             console.warn(`Failed to generate thumbnail for ${a.path}:`, e);
             // If CORS fails, try creating a new signed URL without download flag
@@ -187,8 +239,12 @@ const AssetPanel = ({ onVideoSelect }: AssetPanelProps) => {
                   .getPublicUrl(a.path);
                 
                 if (publicData?.publicUrl) {
-                  thumbnail = await generateVideoThumbnail(publicData.publicUrl);
-                  console.log(`✅ Generated thumbnail with public URL for ${a.original_name || a.path}`);
+                  const result = await generateVideoThumbnailWithMetadata(publicData.publicUrl);
+                  thumbnail = result.thumbnail;
+                  extractedDuration = result.duration;
+                  extractedWidth = result.width;
+                  extractedHeight = result.height;
+                  console.log(`✅ Generated thumbnail with public URL for ${a.original_name || a.path}: ${extractedDuration}s, ${extractedWidth}x${extractedHeight}`);
                 }
               } catch (retryError) {
                 console.error(`Retry also failed for ${a.path}:`, retryError);
@@ -202,9 +258,9 @@ const AssetPanel = ({ onVideoSelect }: AssetPanelProps) => {
           id: a.id,
           name: a.original_name || a.path.split("/").pop() || a.path,
           file_path: a.path,
-          duration: a.duration || 0,
-          width: a.width || 0,
-          height: a.height || 0,
+          duration: extractedDuration,
+          width: extractedWidth,
+          height: extractedHeight,
           size: a.size || 0,
           mimetype: a.mimetype || "",
           thumbnail,
@@ -251,7 +307,175 @@ const AssetPanel = ({ onVideoSelect }: AssetPanelProps) => {
     }
   }, [toast, addAsset]);
 
-  // Function to generate thumbnail from video URL
+  // Function to generate thumbnail and extract metadata from video URL
+  const generateVideoThumbnailWithMetadata = (videoUrl: string): Promise<{thumbnail: string, duration: number, width: number, height: number}> => {
+    return new Promise((resolve, reject) => {
+      console.log(`🎬 [AssetPanel] Starting thumbnail generation with metadata for URL: ${videoUrl.substring(0, 100)}...`);
+      
+      const video = document.createElement('video');
+      video.crossOrigin = 'anonymous'; // Required to avoid canvas taint issues
+      video.muted = true; // Required for autoplay in some browsers
+      video.preload = 'metadata';
+      video.playsInline = true; // Better support for mobile/iOS
+      
+      let isResolved = false;
+      let timeoutId: NodeJS.Timeout | null = null;
+      
+      const cleanup = () => {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+        video.removeEventListener('loadedmetadata', onLoadedMetadata);
+        video.removeEventListener('seeked', onSeeked);
+        video.removeEventListener('error', onError);
+        video.removeEventListener('abort', onAbort);
+        video.removeEventListener('canplay', onCanPlay);
+        video.src = '';
+        video.load(); // Clear video element completely
+      };
+      
+      const resolveOnce = (result: {thumbnail: string, duration: number, width: number, height: number}) => {
+        if (!isResolved) {
+          isResolved = true;
+          cleanup();
+          console.log(`🎬 [AssetPanel] ✅ Successfully generated thumbnail with metadata`);
+          resolve(result);
+        }
+      };
+      
+      const rejectOnce = (error: Error) => {
+        if (!isResolved) {
+          isResolved = true;
+          cleanup();
+          console.error(`🎬 [AssetPanel] ❌ Failed to generate thumbnail with metadata:`, error);
+          reject(error);
+        }
+      };
+      
+      const onLoadedMetadata = () => {
+        console.log(`🎬 [AssetPanel] Video metadata loaded - duration: ${video.duration}s, dimensions: ${video.videoWidth}x${video.videoHeight}`);
+        
+        // Validate video dimensions before proceeding
+        if (video.videoWidth === 0 || video.videoHeight === 0) {
+          console.warn(`🎬 [AssetPanel] Video has invalid dimensions, waiting for canplay event...`);
+          return; // Wait for canplay event which might have correct dimensions
+        }
+        
+        try {
+          // Always use 1 second as requested by user, with fallback for very short videos
+          let seekTime = 1.0;
+          if (video.duration < 1.0) {
+            seekTime = Math.max(0.1, video.duration * 0.5); // Use middle point for very short videos
+          }
+          console.log(`🎬 [AssetPanel] Seeking to ${seekTime}s for thumbnail capture`);
+          video.currentTime = seekTime;
+        } catch (e) {
+          rejectOnce(new Error(`Failed to seek video: ${e}`));
+        }
+      };
+      
+      const onCanPlay = () => {
+        console.log(`🎬 [AssetPanel] Video can play - dimensions: ${video.videoWidth}x${video.videoHeight}`);
+        // If we still don't have dimensions from loadedmetadata, try again here
+        if (video.videoWidth > 0 && video.videoHeight > 0 && video.currentTime === 0) {
+          onLoadedMetadata();
+        }
+      };
+      
+      const onSeeked = () => {
+        console.log(`🎬 [AssetPanel] Video seeked successfully to ${video.currentTime}s, capturing frame...`);
+        try {
+          const canvas = document.createElement('canvas');
+          const ctx = canvas.getContext('2d');
+          
+          if (!ctx) {
+            throw new Error('Failed to get canvas 2D context');
+          }
+          
+          // Use fallback dimensions if video dimensions are still invalid
+          const width = video.videoWidth || 320;
+          const height = video.videoHeight || 240;
+          
+          if (width === 0 || height === 0) {
+            throw new Error('Video has invalid dimensions even after canplay');
+          }
+          
+          canvas.width = width;
+          canvas.height = height;
+          
+          // Clear canvas with black background first
+          ctx.fillStyle = 'black';
+          ctx.fillRect(0, 0, width, height);
+          
+          ctx.drawImage(video, 0, 0, width, height);
+          
+          try {
+            const thumbnailDataUrl = canvas.toDataURL('image/jpeg', 0.9); // Higher quality
+            
+            if (!thumbnailDataUrl || thumbnailDataUrl === 'data:,' || thumbnailDataUrl.length < 100) {
+              throw new Error('Failed to generate valid thumbnail data');
+            }
+            
+            // Return both thumbnail and metadata
+            resolveOnce({
+              thumbnail: thumbnailDataUrl,
+              duration: video.duration || 0,
+              width: video.videoWidth || width,
+              height: video.videoHeight || height
+            });
+          } catch (canvasError) {
+            // Check if this is a CORS/SecurityError
+            if (canvasError instanceof DOMException && canvasError.name === 'SecurityError') {
+              rejectOnce(new Error(`SecurityError: Failed to extract canvas data due to CORS restrictions. The video may be from a different origin. ${canvasError.message}`));
+            } else {
+              rejectOnce(new Error(`Failed to extract thumbnail data: ${canvasError}`));
+            }
+          }
+        } catch (e) {
+          rejectOnce(new Error(`Failed to capture video frame: ${e}`));
+        }
+      };
+      
+      const onError = (e: any) => {
+        console.error('🎬 [AssetPanel] Video error event:', e);
+        console.error('🎬 [AssetPanel] Video error details:', {
+          error: video.error,
+          networkState: video.networkState,
+          readyState: video.readyState,
+          src: video.src.substring(0, 100) + '...'
+        });
+        rejectOnce(new Error('Failed to load video for thumbnail generation'));
+      };
+      
+      const onAbort = () => {
+        console.warn('🎬 [AssetPanel] Video loading was aborted');
+        rejectOnce(new Error('Video loading was aborted'));
+      };
+      
+      // Add event listeners
+      video.addEventListener('loadedmetadata', onLoadedMetadata);
+      video.addEventListener('seeked', onSeeked);
+      video.addEventListener('error', onError);
+      video.addEventListener('abort', onAbort);
+      video.addEventListener('canplay', onCanPlay);
+      
+      // Set longer timeout for larger videos
+      timeoutId = setTimeout(() => {
+        rejectOnce(new Error('Timeout: Video took too long to load (30 seconds)'));
+      }, 30000); // Increased to 30 second timeout
+      
+      // Start loading the video
+      try {
+        console.log(`🎬 [AssetPanel] Setting video source...`);
+        video.src = videoUrl;
+      } catch (e) {
+        rejectOnce(new Error(`Failed to set video source: ${e}`));
+      }
+    });
+  };
+
+  // Function to generate thumbnail from video URL (legacy version for compatibility)
   const generateVideoThumbnail = (videoUrl: string): Promise<string> => {
     return new Promise((resolve, reject) => {
       console.log(`🎬 [AssetPanel] Starting thumbnail generation for URL: ${videoUrl.substring(0, 100)}...`);

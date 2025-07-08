@@ -21,6 +21,9 @@ interface PlaybackState {
 }
 
 export const useTimelinePlayer = (videoRef: React.RefObject<HTMLVideoElement>) => {
+  const renderCountRef = useRef(0);
+  renderCountRef.current++;
+  
   const { clips, currentTime, setCurrentTime, duration, setVideoSrc } = useEditorStore();
   
   const [timelineClips, setTimelineClips] = useState<TimelineClip[]>([]);
@@ -38,7 +41,6 @@ export const useTimelinePlayer = (videoRef: React.RefObject<HTMLVideoElement>) =
   // Centralized function to ensure consistent playback rate
   const ensureNormalPlaybackRate = useCallback((video: HTMLVideoElement, context: string = '') => {
     if (video.playbackRate !== 1.0) {
-      console.log(`🎬 [TimelinePlayer] Correcting playback rate from ${video.playbackRate} to 1.0 ${context}`);
       video.playbackRate = 1.0;
     }
   }, []);
@@ -48,8 +50,6 @@ export const useTimelinePlayer = (videoRef: React.RefObject<HTMLVideoElement>) =
     const videoClips = clips
       .filter(clip => clip.type === 'video')
       .sort((a, b) => a.start - b.start);
-
-    console.log('🚀 [TimelinePlayer] Preloading URLs for', videoClips.length, 'video clips');
 
     const urlPromises = videoClips.map(async (clip) => {
       // Check cache first
@@ -64,17 +64,14 @@ export const useTimelinePlayer = (videoRef: React.RefObject<HTMLVideoElement>) =
           .createSignedUrl(clip.file_path, 3600);
 
         if (error || !urlData?.signedUrl) {
-          console.error(`🚀 [TimelinePlayer] Failed to create signed URL for ${clip.name}:`, error);
           return clip;
         }
 
         // Cache the URL
         urlCache.current.set(clip.file_path, urlData.signedUrl);
-        console.log(`🚀 [TimelinePlayer] ✅ Preloaded URL for ${clip.name}`);
         
         return { ...clip, signedUrl: urlData.signedUrl };
       } catch (error) {
-        console.error(`🚀 [TimelinePlayer] Error preloading URL for ${clip.name}:`, error);
         return clip;
       }
     });
@@ -95,24 +92,23 @@ export const useTimelinePlayer = (videoRef: React.RefObject<HTMLVideoElement>) =
     
     setTimelineClips(mappedClips);
     
-    console.log('🚀 [TimelinePlayer] Preload complete:', mappedClips.length, 'clips ready');
-    
     // Preload the first video for immediate playback
     if (mappedClips.length > 0 && mappedClips[0].signedUrl && videoRef.current) {
-      console.log('🚀 [TimelinePlayer] Preloading first video for immediate playback');
       try {
         const video = videoRef.current;
         video.src = mappedClips[0].signedUrl;
         video.load();
+        
+        // 🔧 FIX: Ensure first clip has correct playback rate
+        ensureNormalPlaybackRate(video, `first clip preload: ${mappedClips[0].name}`);
+        
         setVideoSrc(mappedClips[0].signedUrl);
-        console.log('🚀 [TimelinePlayer] ✅ First video preloaded');
       } catch (error) {
-        console.warn('🚀 [TimelinePlayer] Could not preload first video:', error);
       }
     }
     
     return mappedClips;
-  }, [clips, videoRef, setVideoSrc]);
+  }, [clips, videoRef, setVideoSrc, ensureNormalPlaybackRate]);
 
   // Find clip at specific timeline time using binary search
   const findClipAtTime = useCallback((time: number): TimelineClip | null => {
@@ -141,23 +137,19 @@ export const useTimelinePlayer = (videoRef: React.RefObject<HTMLVideoElement>) =
   const switchToClip = useCallback(async (clip: TimelineClip, clipPosition: number): Promise<boolean> => {
     const video = videoRef.current;
     if (!video || !clip.signedUrl) {
-      console.warn('🎬 [TimelinePlayer] Cannot switch - missing video ref or URL');
       return false;
     }
 
     // Prevent overlapping switches
     if (switchingRef.current) {
-      console.log(`🎬 [TimelinePlayer] Switch in progress, skipping switch to ${clip.name}`);
       return false;
     }
 
     switchingRef.current = true;
-    console.log(`🎬 [TimelinePlayer] Switching to ${clip.name} at position ${clipPosition.toFixed(2)}s`);
 
     try {
       // Only load if it's a different video source
       if (video.src !== clip.signedUrl) {
-        console.log(`🎬 [TimelinePlayer] Loading new source: ${clip.name}`);
         setVideoSrc(clip.signedUrl);
         video.src = clip.signedUrl;
         video.load();
@@ -177,15 +169,11 @@ export const useTimelinePlayer = (videoRef: React.RefObject<HTMLVideoElement>) =
           };
 
           const onCanPlayThrough = () => {
-            console.log(`🎬 [TimelinePlayer] Video can play through: ${clip.name}`);
             cleanup();
             resolve();
           };
 
           const onLoadedMetadata = () => {
-            console.log(`🎬 [TimelinePlayer] Metadata loaded for: ${clip.name}`);
-            // For the first clip or when we need immediate playback, use loadedmetadata
-            // For better performance, but canplaythrough is better for smooth playback
             if (video.readyState >= video.HAVE_CURRENT_DATA) {
               cleanup();
               resolve();
@@ -193,7 +181,6 @@ export const useTimelinePlayer = (videoRef: React.RefObject<HTMLVideoElement>) =
           };
 
           const onError = (e: Event) => {
-            console.error(`🎬 [TimelinePlayer] Error loading ${clip.name}:`, e);
             cleanup();
             reject(new Error('Error loading video'));
           };
@@ -222,16 +209,12 @@ export const useTimelinePlayer = (videoRef: React.RefObject<HTMLVideoElement>) =
       
       // Resume playback if we were playing
       if (playbackState.isPlaying) {
-        console.log(`🎬 [TimelinePlayer] Starting playback for ${clip.name} at ${clipPosition.toFixed(2)}s`);
-        // Ensure playback rate is still correct before playing
         ensureNormalPlaybackRate(video, `before play() for ${clip.name}`);
         await video.play();
       }
 
-      console.log(`✅ [TimelinePlayer] Successfully switched to ${clip.name}`);
       return true;
     } catch (error) {
-      console.error(`🎬 [TimelinePlayer] Error switching to ${clip.name}:`, error);
       return false;
     } finally {
       switchingRef.current = false;
@@ -243,8 +226,10 @@ export const useTimelinePlayer = (videoRef: React.RefObject<HTMLVideoElement>) =
     if (playbackState.isPlaying) return;
 
     console.log(`▶️ [TimelinePlayer] Starting playback at ${currentTime.toFixed(2)}s`);
+    console.log(`▶️ [TimelinePlayer] Available clips:`, timelineClips.map(c => `${c.name} (${c.start}s-${c.end}s)`));
     
     const currentClip = findClipAtTime(currentTime);
+    console.log(`▶️ [TimelinePlayer] Current clip at ${currentTime.toFixed(2)}s:`, currentClip?.name || 'none');
     
     if (currentClip) {
       console.log(`▶️ [TimelinePlayer] Found clip: ${currentClip.name} for playback`);
@@ -306,6 +291,12 @@ export const useTimelinePlayer = (videoRef: React.RefObject<HTMLVideoElement>) =
 
   // Timeline update loop
   useEffect(() => {
+    console.log('🚨 [DEBUG] Timeline effect triggered, dependencies changed:', {
+      isPlaying: playbackState.isPlaying,
+      startTime: playbackState.startTime,
+      currentClip: playbackState.currentClip?.id
+    });
+    
     if (!playbackState.isPlaying) return;
 
     const updateTimeline = () => {
@@ -313,6 +304,7 @@ export const useTimelinePlayer = (videoRef: React.RefObject<HTMLVideoElement>) =
       const newTimelineTime = playbackState.timelineStartPosition + elapsed;
 
       // Update timeline cursor
+      console.log('🚨 [DEBUG] setCurrentTime called with:', newTimelineTime.toFixed(3));
       setCurrentTime(newTimelineTime);
 
       // Check if we've reached the end
@@ -333,6 +325,7 @@ export const useTimelinePlayer = (videoRef: React.RefObject<HTMLVideoElement>) =
             const clipPosition = newTimelineTime - currentClip.start;
             switchToClip(currentClip, clipPosition).then(success => {
               if (success) {
+                console.log('🚨 [DEBUG] setPlaybackState called - switching clip to:', currentClip.id);
                 setPlaybackState(prev => ({
                   ...prev,
                   currentClip
@@ -389,19 +382,7 @@ export const useTimelinePlayer = (videoRef: React.RefObject<HTMLVideoElement>) =
         clearTimeout(animationFrameRef.current);
       }
     };
-  }, [
-    playbackState.isPlaying,
-    playbackState.startTime,
-    playbackState.timelineStartPosition,
-    playbackState.currentClip,
-    findClipAtTime,
-    switchToClip,
-    stopPlayback,
-    duration,
-    videoRef,
-    setCurrentTime,
-    ensureNormalPlaybackRate
-  ]);
+  }, [playbackState.isPlaying]); // 🔧 FIX: Only depend on isPlaying to prevent infinite loops
 
   // Preload URLs when clips change
   useEffect(() => {

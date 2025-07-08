@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useMemo } from 'react';
 import { persist } from 'zustand/middleware';
 import * as GESApi from '../api/apiClient';
 import { 
@@ -238,6 +238,9 @@ interface EditorState {
   // Loading states
   isLoading: boolean;
   error: string | null;
+  
+  // Internal state flags
+  _isUpdatingClips?: boolean;
 }
 
 interface EditorStore extends EditorState {
@@ -407,30 +410,65 @@ export const useEditorStore = create<EditorStore>()(
       batchOperationInProgress: false,
       lastBatchResult: null,
       
+      // Internal state flags
+      _isUpdatingClips: false,
+      
       // Actions
       setClips: (clips) => {
         console.log("🎬 [Store] setClips called with:", clips);
         console.log("🎬 [Store] setClips count:", clips.length);
-        console.log("🎬 [Store] Previous clips:", get().clips);
         
-        // Log stack trace to see where this is being called from
-        console.trace("🎬 [Store] setClips call stack");
+        const currentClips = get().clips;
         
-        set({ clips });
-        
-        console.log("🎬 [Store] About to call recalculateDuration...");
-        try {
-          const state = get();
-          console.log("🎬 [Store] Got state, calling recalculateDuration");
-          state.recalculateDuration();
-          console.log("🎬 [Store] recalculateDuration call completed");
-        } catch (error) {
-          console.error("🎬 [Store] Error calling recalculateDuration:", error);
+        // Enhanced change detection to prevent infinite loops
+        if (currentClips === clips) {
+          console.log("🎬 [Store] setClips skipped - same reference");
+          return;
         }
         
-        console.log("🎬 [Store] About to call pushToHistory...");
-        get().pushToHistory();
-        console.log("🎬 [Store] setClips completed");
+        // Deep comparison for meaningful changes
+        if (currentClips.length === clips.length) {
+          const hasChanges = clips.some((clip, index) => {
+            const currentClip = currentClips[index];
+            return !currentClip || 
+                   clip.id !== currentClip.id ||
+                   clip.start !== currentClip.start ||
+                   clip.end !== currentClip.end ||
+                   clip.track !== currentClip.track ||
+                   clip.type !== currentClip.type ||
+                   clip.name !== currentClip.name;
+          });
+          
+          if (!hasChanges) {
+            console.log("🎬 [Store] setClips skipped - no meaningful changes detected");
+            return;
+          }
+        }
+        
+        // Add recursion protection
+        const isUpdating = get()._isUpdatingClips;
+        if (isUpdating) {
+          console.log("🎬 [Store] setClips skipped - already updating");
+          return;
+        }
+        
+        // Set updating flag and clips
+        set({ clips, _isUpdatingClips: true });
+        
+        // Use timeout to defer operations and prevent immediate re-entry
+        setTimeout(() => {
+          try {
+            const state = get();
+            if (state._isUpdatingClips) {
+              state.recalculateDuration();
+              state.pushToHistory();
+              set({ _isUpdatingClips: false });
+            }
+          } catch (error) {
+            console.error("🎬 [Store] Error in deferred operations:", error);
+            set({ _isUpdatingClips: false });
+          }
+        }, 10);
       },
       
       addClip: (clip) => {
@@ -728,9 +766,16 @@ export const useEditorStore = create<EditorStore>()(
         set({ duration: newDuration });
       },
       
-      addAsset: (asset) => set((state) => ({ assets: [...state.assets, asset] })),
+      addAsset: (asset) => {
+        console.log("🎬 [Store] Adding asset to store:", asset.name, "duration:", asset.duration);
+        set((state) => ({ assets: [...state.assets, asset] }));
+      },
       removeAsset: (id) => set((state) => ({ assets: state.assets.filter(a => a.id !== id) })),
-      getAssetById: (id) => get().assets.find(a => a.id === id),
+      getAssetById: (id) => {
+        const asset = get().assets.find(a => a.id === id);
+        console.log("🎬 [Store] Getting asset by ID:", id, "found:", asset?.name, "duration:", asset?.duration);
+        return asset;
+      },
       
       setProjectName: (name) => set({ projectName: name }),
       
@@ -1712,45 +1757,90 @@ export const useGESTimelineZoom = () => useEditorStore((state) => state.timeline
 export const useGESLoading = () => useEditorStore((state) => state.isLoading);
 export const useGESError = () => useEditorStore((state) => state.error);
 
-// Custom hook for GES project actions
-export const useGESProjectActions = () => useEditorStore((state) => ({
-  // Project management
-  checkAvailability: state.checkGESAvailability,
-  createProject: state.createGESProject,
-  loadProject: state.loadGESProject,
-  deleteProject: state.deleteGESProject,
-  setCurrentProject: state.setCurrentGESProject,
+// Custom hook for GES project actions - FIXED: Use stable selector pattern to prevent infinite loops
+export const useGESProjectActions = () => {
+  // Remove logging to clean up console
+  // console.count('🚨 [editorStore] useGESProjectActions called');
   
-  // Asset management
-  addAsset: state.addGESAsset,
-  removeAsset: state.removeGESAsset,
-  refreshAssetMetadata: state.refreshGESAssetMetadata,
+  // Use individual selectors instead of a single object selector to prevent new object creation
+  const checkAvailability = useEditorStore((state) => state.checkGESAvailability);
+  const createProject = useEditorStore((state) => state.createGESProject);
+  const loadProject = useEditorStore((state) => state.loadGESProject);
+  const deleteProject = useEditorStore((state) => state.deleteGESProject);
+  const setCurrentProject = useEditorStore((state) => state.setCurrentGESProject);
   
-  // Timeline management
-  addClipToLayer: state.addGESClipToLayer,
-  addTitleClip: state.addGESTitleClip,
-  moveClip: state.moveGESClip,
-  trimClip: state.trimGESClip,
-  removeClip: state.removeGESClip,
+  const addAsset = useEditorStore((state) => state.addGESAsset);
+  const removeAsset = useEditorStore((state) => state.removeGESAsset);
+  const refreshAssetMetadata = useEditorStore((state) => state.refreshGESAssetMetadata);
   
-  // Preview and export
-  startPreview: state.startGESPreview,
-  pausePreview: state.pauseGESPreview,
-  stopPreview: state.stopGESPreview,
-  seekPreview: state.seekGESPreview,
-  exportProject: state.exportGESProject,
+  const addClipToLayer = useEditorStore((state) => state.addGESClipToLayer);
+  const addTitleClip = useEditorStore((state) => state.addGESTitleClip);
+  const moveClip = useEditorStore((state) => state.moveGESClip);
+  const trimClip = useEditorStore((state) => state.trimGESClip);
+  const removeClip = useEditorStore((state) => state.removeGESClip);
   
-  // Advanced timeline control
-  addTimelineMarker: state.addGESTimelineMarker,
-  removeTimelineMarker: state.removeGESTimelineMarker,
-  seekToFrame: state.seekGESToFrame,
-  setTimelineZoom: state.setGESTimelineZoom,
-  snapToClips: state.snapGESToClips,
+  const startPreview = useEditorStore((state) => state.startGESPreview);
+  const pausePreview = useEditorStore((state) => state.pauseGESPreview);
+  const stopPreview = useEditorStore((state) => state.stopGESPreview);
+  const seekPreview = useEditorStore((state) => state.seekGESPreview);
+  const exportProject = useEditorStore((state) => state.exportGESProject);
   
-  // State management
-  setLoading: state.setLoading,
-  setError: state.setError
-}));
+  const addTimelineMarker = useEditorStore((state) => state.addGESTimelineMarker);
+  const removeTimelineMarker = useEditorStore((state) => state.removeGESTimelineMarker);
+  const seekToFrame = useEditorStore((state) => state.seekGESToFrame);
+  const setTimelineZoom = useEditorStore((state) => state.setGESTimelineZoom);
+  const snapToClips = useEditorStore((state) => state.snapGESToClips);
+  
+  const setLoading = useEditorStore((state) => state.setLoading);
+  const setError = useEditorStore((state) => state.setError);
+  
+  // Return a stable object using useMemo to prevent infinite re-renders
+  return useMemo(() => ({
+    // Project management
+    checkAvailability,
+    createProject,
+    loadProject,
+    deleteProject,
+    setCurrentProject,
+    
+    // Asset management
+    addAsset,
+    removeAsset,
+    refreshAssetMetadata,
+    
+    // Timeline management
+    addClipToLayer,
+    addTitleClip,
+    moveClip,
+    trimClip,
+    removeClip,
+    
+    // Preview and export
+    startPreview,
+    pausePreview,
+    stopPreview,
+    seekPreview,
+    exportProject,
+    
+    // Advanced timeline control
+    addTimelineMarker,
+    removeTimelineMarker,
+    seekToFrame,
+    setTimelineZoom,
+    snapToClips,
+    
+    // State management
+    setLoading,
+    setError
+  }), [
+    checkAvailability, createProject, loadProject, deleteProject, setCurrentProject,
+    addAsset, removeAsset, refreshAssetMetadata,
+    addClipToLayer, addTitleClip, moveClip, trimClip, removeClip,
+    startPreview, pausePreview, stopPreview, seekPreview, exportProject,
+    addTimelineMarker, removeTimelineMarker, seekToFrame, setTimelineZoom, snapToClips,
+    setLoading, setError
+  ]);
+};
 
 // Custom hook for layer-specific clips
 export const useGESClipsByLayer = (projectId?: string) => useEditorStore((state) => {

@@ -60,6 +60,8 @@ export const useGESPlayer = () => {
 
   const apiBaseUrl = 'http://localhost:8000/api';
   const pollIntervalRef = useRef<number>();
+  const timelineSyncRef = useRef<number>();
+  const playbackStartTimeRef = useRef<number>(0);
   const isInitialized = useRef(false);
 
   // Convert editor clips to GES format with validation and signed URLs
@@ -226,6 +228,48 @@ export const useGESPlayer = () => {
     }
   }, [clips, gesApiRequest, convertClipsToGES, setDuration]);
 
+  // Timeline sync functions - declared early to avoid reference errors
+  const stopTimelineSync = useCallback(() => {
+    if (timelineSyncRef.current) {
+      clearInterval(timelineSyncRef.current);
+      timelineSyncRef.current = undefined;
+      console.log(`🎬 [GES] Timeline sync stopped`);
+    }
+  }, []);
+
+  const startTimelineSync = useCallback(() => {
+    if (timelineSyncRef.current) {
+      clearInterval(timelineSyncRef.current);
+    }
+    
+    playbackStartTimeRef.current = Date.now();
+    const startPosition = currentTime;
+    
+    console.log(`🎬 [GES] Starting timeline sync from position ${startPosition}s`);
+    
+    timelineSyncRef.current = window.setInterval(() => {
+      const elapsed = (Date.now() - playbackStartTimeRef.current) / 1000;
+      const newPosition = startPosition + elapsed;
+      
+      // Check if we've reached the end of the timeline
+      if (newPosition >= playerState.duration) {
+        console.log(`🎬 [GES] Reached end of timeline at ${newPosition}s`);
+        setCurrentTime(playerState.duration);
+        // Stop timeline sync
+        if (timelineSyncRef.current) {
+          clearInterval(timelineSyncRef.current);
+          timelineSyncRef.current = undefined;
+        }
+        // Auto-stop playback when timeline ends (call async function)
+        gesApiRequest('/ges/stop-preview', 'POST').then(() => {
+          setPlayerState(prev => ({ ...prev, isPlaying: false }));
+        }).catch(console.warn);
+      } else {
+        setCurrentTime(newPosition);
+      }
+    }, 50); // Update every 50ms for smooth cursor movement
+  }, [currentTime, playerState.duration, setCurrentTime, gesApiRequest, setPlayerState]);
+
   // Start preview server
   const startPreview = useCallback(async (port: number = 8554): Promise<boolean> => {
     try {
@@ -262,6 +306,9 @@ export const useGESPlayer = () => {
       const response = await gesApiRequest('/ges/stop-preview', 'POST');
       
       if (response.success) {
+        // Stop timeline sync first
+        stopTimelineSync();
+        
         setPlayerState(prev => ({
           ...prev,
           isPlaying: false
@@ -276,7 +323,7 @@ export const useGESPlayer = () => {
       console.error('🎬 [GES] Failed to stop preview:', error);
       return false;
     }
-  }, [gesApiRequest]);
+  }, [gesApiRequest, stopTimelineSync]);
 
   // Seek to position
   const seekToPosition = useCallback(async (position: number): Promise<boolean> => {
@@ -360,19 +407,30 @@ export const useGESPlayer = () => {
     }
   }, [gesApiRequest, setDuration]);
 
-  // Toggle playback
+  // Toggle playback with timeline sync
   const togglePlayback = useCallback(async (): Promise<boolean> => {
     if (playerState.isPlaying) {
-      return await stopPreview();
+      const stopped = await stopPreview();
+      if (stopped) {
+        // Reset timeline position for next play
+        setCurrentTime(0);
+      }
+      return stopped;
     } else {
       // Ensure timeline exists first
       if (!playerState.hasTimeline) {
         const created = await createTimeline();
         if (!created) return false;
       }
-      return await startPreview();
+      
+      const started = await startPreview();
+      if (started) {
+        // Start timeline progress simulation
+        startTimelineSync();
+      }
+      return started;
     }
-  }, [playerState.isPlaying, playerState.hasTimeline, stopPreview, startPreview, createTimeline]);
+  }, [playerState.isPlaying, playerState.hasTimeline, stopPreview, startPreview, createTimeline, setCurrentTime, startTimelineSync]);
 
   // Initialize GES timeline when clips change
   useEffect(() => {
@@ -417,6 +475,10 @@ export const useGESPlayer = () => {
     return () => {
       if (pollIntervalRef.current) {
         clearInterval(pollIntervalRef.current);
+      }
+      
+      if (timelineSyncRef.current) {
+        clearInterval(timelineSyncRef.current);
       }
       
       // Cleanup GES resources

@@ -7,6 +7,7 @@ import UndoIcon from "@/components/icons/UndoIcon";
 import RedoIcon from "@/components/icons/RedoIcon";
 import { useEditorStore } from "@/store/editorStore";
 import { useTimelinePlayer } from "@/hooks/useTimelinePlayer";
+import { useSeamlessTimelinePlayer } from "@/hooks/useSeamlessTimelinePlayer";
 import { useGESPlayer } from "@/hooks/useGESPlayer";
 
 interface VideoPlayerProps {
@@ -28,31 +29,44 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
   rightControl,
   clips = [],
 }, ref) => {
-  const videoRef = useRef<HTMLVideoElement>(null);
+  const videoContainerRef = useRef<HTMLDivElement>(null);
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
   const [isControlsVisible, setIsControlsVisible] = useState(true);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [useGESMode, setUseGESMode] = useState(false); // Toggle between timeline and GES modes
+  const [useGESMode, setUseGESMode] = useState(true); // Default to GES mode
+  const [useSeamlessMode, setUseSeamlessMode] = useState(true); // Enable seamless mode
   const controlsTimeoutRef = useRef<number | null>(null);
   const lastToggleRef = useRef<number | null>(null);
   
   // Get undo/redo functions from store
   const { undo, redo, history } = useEditorStore();
   
-  // Use the forwarded ref or fall back to internal ref
-  const resolvedRef = (ref as React.RefObject<HTMLVideoElement>) || videoRef;
+  // Legacy single video element (for fallback)
+  const singleVideoRef = useRef<HTMLVideoElement>(null);
   
-  // Traditional timeline player system
+  // Traditional timeline player system (legacy)
   const {
     isPlaying: isTimelinePlaying,
     currentClip,
-    timelineClips,
+    timelineClips: legacyTimelineClips,
     togglePlayback: toggleTimelinePlayback,
     stopPlayback: stopTimelinePlayback,
     startPlayback: startTimelinePlayback,
     isReady: timelineReady
-  } = useTimelinePlayer(resolvedRef);
+  } = useTimelinePlayer(singleVideoRef);
+
+  // New seamless timeline player system
+  const {
+    isPlaying: isSeamlessPlaying,
+    currentClip: seamlessCurrentClip,
+    timelineClips: seamlessTimelineClips,
+    togglePlayback: toggleSeamlessPlayback,
+    startPlayback: startSeamlessPlayback,
+    stopPlayback: stopSeamlessPlayback,
+    seekToTime: seekSeamlessToTime,
+    isReady: seamlessReady
+  } = useSeamlessTimelinePlayer(videoContainerRef);
 
   // GES player system
   const {
@@ -67,19 +81,21 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
   } = useGESPlayer();
 
   // Determine which player system to use
-  const activePlayer = useGESMode ? 'ges' : 'timeline';
-  const activeIsPlaying = useGESMode ? gesIsPlaying : isTimelinePlaying;
-  const activeIsReady = useGESMode ? gesReady : timelineReady;
-  const activeTogglePlayback = useGESMode ? toggleGESPlayback : toggleTimelinePlayback;
+  const activePlayerType = useGESMode ? 'ges' : (useSeamlessMode ? 'seamless' : 'timeline');
+  const activeIsPlaying = useGESMode ? gesIsPlaying : (useSeamlessMode ? isSeamlessPlaying : isTimelinePlaying);
+  const activeIsReady = useGESMode ? gesReady : (useSeamlessMode ? seamlessReady : timelineReady);
+  const activeTogglePlayback = useGESMode ? toggleGESPlayback : (useSeamlessMode ? toggleSeamlessPlayback : toggleTimelinePlayback);
+  const activeTimelineClips = useSeamlessMode ? seamlessTimelineClips : legacyTimelineClips;
+  const activeCurrentClip = useSeamlessMode ? seamlessCurrentClip : currentClip;
 
-  // Update video currentTime when prop changes (only for timeline mode)
+  // Update video currentTime when prop changes (only for legacy timeline mode)
   useEffect(() => {
-    if (useGESMode) return; // GES handles its own seeking
+    if (useGESMode || useSeamlessMode) return; // GES and seamless modes handle their own seeking
+    if (isTimelinePlaying) return; // Don't sync during timeline playback to prevent loops
     
-    const video = resolvedRef.current;
-    if (video && !isTimelinePlaying && Math.abs(video.currentTime - currentTime) > 0.5) {
-      // Only sync when not playing to avoid interference with timeline playback
-      const currentClipAtTime = timelineClips.find(clip => 
+    const video = singleVideoRef.current;
+    if (video && Math.abs(video.currentTime - currentTime) > 0.5) {
+      const currentClipAtTime = legacyTimelineClips.find(clip => 
         currentTime >= clip.start && currentTime < clip.end
       );
       
@@ -94,30 +110,64 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
         }
       }
     }
-  }, [currentTime, resolvedRef, isTimelinePlaying, timelineClips, useGESMode]);
+  }, [isTimelinePlaying, legacyTimelineClips.length, useGESMode, useSeamlessMode, currentTime]);
 
-  // Handle seeking for GES mode
+  // Handle seeking for different modes
   const handleSeek = async (position: number) => {
     if (useGESMode && gesSeekToPosition) {
       await gesSeekToPosition(position);
+    } else if (useSeamlessMode && seekSeamlessToTime) {
+      seekSeamlessToTime(position);
     } else {
-      // Traditional timeline seeking is handled by the timeline player
+      // Traditional timeline seeking
       onTimeUpdate(position);
     }
   };
 
   // Toggle play/pause
   const togglePlayPause = async () => {
-    console.log(`🎮 [VideoPlayer] Toggle playback (${activePlayer} mode)`);
+    console.log(`🎮 [VideoPlayer] Toggle playback (${activePlayerType} mode) - clips: ${activeTimelineClips.length}`);
     
     if (useGESMode) {
-      await toggleGESPlayback();
+      // Hybrid approach: GES manages timeline progression, seamless player handles video display
+      if (activeTimelineClips.length > 0) {
+        if (gesIsPlaying) {
+          console.log(`🎮 [VideoPlayer] Stopping hybrid playback - GES and seamless video`);
+          await toggleGESPlayback();
+          if (useSeamlessMode) {
+            stopSeamlessPlayback();
+          } else {
+            stopTimelinePlayback();
+          }
+        } else {
+          console.log(`🎮 [VideoPlayer] Starting hybrid playback - GES timeline sync + seamless video`);
+          await toggleGESPlayback();
+          
+          if (activeTimelineClips.length > 0) {
+            if (useSeamlessMode) {
+              startSeamlessPlayback();
+            } else {
+              startTimelinePlayback();
+            }
+          }
+        }
+      } else {
+        await toggleGESPlayback();
+      }
+    } else if (useSeamlessMode) {
+      // Pure seamless mode
+      if (activeTimelineClips.length > 0) {
+        toggleSeamlessPlayback();
+      } else {
+        console.log('🎮 [VideoPlayer] No clips available for seamless playback');
+      }
     } else {
-      if (timelineClips.length > 0) {
+      // Traditional timeline mode
+      if (activeTimelineClips.length > 0) {
         toggleTimelinePlayback();
       } else {
         // Fallback to regular video playback if no timeline clips
-        const video = resolvedRef.current;
+        const video = singleVideoRef.current;
         if (!video) return;
         
         if (isPlaying) {
@@ -133,47 +183,85 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
         }
       }
     }
-  };
+  }
+
+  // Toggle seamless mode
+  const toggleSeamlessMode = useCallback(() => {
+    console.log(`🎮 [VideoPlayer] Toggling seamless mode: ${useSeamlessMode ? 'OFF' : 'ON'}`);
+    
+    // Stop current playback before switching
+    if (activeIsPlaying) {
+      if (useSeamlessMode) {
+        stopSeamlessPlayback();
+      } else {
+        stopTimelinePlayback();
+      }
+    }
+    
+    setUseSeamlessMode(!useSeamlessMode);
+  }, [useSeamlessMode, activeIsPlaying, stopSeamlessPlayback, stopTimelinePlayback]);
 
   // Toggle between GES and Timeline modes with debouncing
   const togglePlayerMode = useCallback(() => {
     // Debounce to prevent rapid switching
     const now = Date.now();
     if (lastToggleRef.current && now - lastToggleRef.current < 500) {
-      return; // Ignore rapid clicks within 500ms
+      return;
     }
     lastToggleRef.current = now;
     
-    console.log(`🎮 [VideoPlayer] Switching from ${activePlayer} to ${useGESMode ? 'timeline' : 'ges'} mode`);
+    console.log(`🎮 [VideoPlayer] Switching from ${activePlayerType} to ${useGESMode ? 'timeline' : 'ges'} mode`);
     
     // Stop any current playback before switching
     if (activeIsPlaying) {
       if (useGESMode) {
         toggleGESPlayback();
+      } else if (useSeamlessMode) {
+        stopSeamlessPlayback();
       } else {
         stopTimelinePlayback();
       }
     }
     
     setUseGESMode(!useGESMode);
-  }, [activePlayer, useGESMode, activeIsPlaying, toggleGESPlayback, stopTimelinePlayback]);
+  }, [activePlayerType, useGESMode, activeIsPlaying, toggleGESPlayback, stopSeamlessPlayback, stopTimelinePlayback]);
 
   // Toggle mute
   const toggleMute = () => {
-    const video = resolvedRef.current;
-    if (!video) return;
-    
-    video.muted = !isMuted;
     setIsMuted(!isMuted);
+    
+    // Apply mute to both video systems
+    if (singleVideoRef.current) {
+      singleVideoRef.current.muted = !isMuted;
+    }
+    
+    // Apply mute to seamless video elements
+    if (videoContainerRef.current) {
+      const videos = videoContainerRef.current.querySelectorAll('video');
+      videos.forEach(video => {
+        video.muted = !isMuted;
+      });
+    }
   };
 
   // Handle volume change
   const handleVolumeChange = (values: number[]) => {
     const newVolume = values[0];
     setVolume(newVolume);
-    if (resolvedRef.current) {
-      resolvedRef.current.volume = newVolume;
+    
+    // Apply volume to both video systems
+    if (singleVideoRef.current) {
+      singleVideoRef.current.volume = newVolume;
     }
+    
+    // Apply volume to seamless video elements
+    if (videoContainerRef.current) {
+      const videos = videoContainerRef.current.querySelectorAll('video');
+      videos.forEach(video => {
+        video.volume = newVolume;
+      });
+    }
+    
     if (newVolume === 0) {
       setIsMuted(true);
     } else if (isMuted) {
@@ -192,11 +280,11 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
     }, 3000);
   };
 
-  // Setup video event listeners (only for timeline mode)
+  // Setup video event listeners (only for legacy timeline mode)
   useEffect(() => {
-    if (useGESMode) return; // GES mode doesn't need video element listeners
+    if (useGESMode || useSeamlessMode) return; // GES and seamless modes don't need single video listeners
     
-    const video = resolvedRef.current;
+    const video = singleVideoRef.current;
     if (!video) return;
 
     // Configure video for optimal playback
@@ -220,7 +308,6 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
 
     const handleEnded = () => {
       setIsPlaying(false);
-      // Stop timeline playback when video ends
       if (isTimelinePlaying) {
         stopTimelinePlayback();
       }
@@ -256,27 +343,37 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
         window.clearTimeout(controlsTimeoutRef.current);
       }
     };
-  }, [resolvedRef, onTimeUpdate, onDurationChange, isTimelinePlaying, stopTimelinePlayback, useGESMode]);
+  }, [onTimeUpdate, onDurationChange, isTimelinePlaying, stopTimelinePlayback, useGESMode, useSeamlessMode]);
 
   // Player status display
   const getPlayerStatus = () => {
     if (useGESMode) {
-      if (gesIsLoading) return "Creating GES timeline...";
-      if (gesError) return "GES Error - Check console for details";
+      if (gesIsLoading) return "Loading timeline...";
+      if (gesError) return "Timeline Error - Check console";
       if (!gesHasTimeline && clips && clips.length > 0) return "Building timeline...";
-      if (!gesHasTimeline) return "Ready to build timeline";
-      if (gesIsPlaying) return "Playing GES timeline";
-      return "GES timeline ready";
+      if (!gesHasTimeline) return "Add clips to timeline";
+      if (gesIsPlaying) return "Playing";
+      return "Ready to play";
+    } else if (useSeamlessMode) {
+      if (!seamlessReady) return "Loading seamless player...";
+      if (seamlessTimelineClips.length === 0) return "Add clips to begin";
+      if (isSeamlessPlaying) {
+        if (seamlessCurrentClip) {
+          return `Playing: ${seamlessCurrentClip.name} (Seamless)`;
+        }
+        return "Playing (Seamless)";
+      }
+      return `${seamlessTimelineClips.length} clips ready (Seamless)`;
     } else {
-      if (!timelineReady) return "Loading timeline player...";
-      if (timelineClips.length === 0) return "Add clips to begin";
+      if (!timelineReady) return "Loading...";
+      if (legacyTimelineClips.length === 0) return "Add clips to begin";
       if (isTimelinePlaying) {
         if (currentClip) {
-          return `Playing: ${currentClip.name}`;
+          return `Playing: ${currentClip.name} (Legacy)`;
         }
-        return "Timeline playing";
+        return "Playing (Legacy)";
       }
-      return `${timelineClips.length} clips ready`;
+      return `${legacyTimelineClips.length} clips ready (Legacy)`;
     }
   };
 
@@ -286,73 +383,68 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
       onMouseMove={showControls}
       onMouseEnter={showControls}
     >
-      {/* Video Element - Hidden in GES mode but may still be used for some operations */}
-      <video
-        ref={resolvedRef}
-        src={src}
-        className={cn(
-          "w-full h-full object-contain",
-          useGESMode && "hidden" // Hide video element in GES mode
-        )}
-        onClick={togglePlayPause}
-      />
-
-      {/* GES Mode Preview */}
-      {useGESMode && (
-        <div className="w-full h-full flex items-center justify-center bg-gray-900 text-white relative">
-          <div className="text-center">
-            <div className="text-xl mb-4 flex items-center justify-center">
-              <div className="w-8 h-8 mr-3 flex-shrink-0">
-                {gesIsLoading ? (
-                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white"></div>
-                ) : gesIsPlaying ? (
-                  <div className="w-8 h-8 bg-green-500 rounded-full flex items-center justify-center">
-                    <Play className="h-4 w-4 text-white" />
-                  </div>
-                ) : gesHasTimeline ? (
-                  <div className="w-8 h-8 bg-blue-500 rounded-full flex items-center justify-center">
-                    <Pause className="h-4 w-4 text-white" />
-                  </div>
-                ) : (
-                  <div className="w-8 h-8 bg-gray-500 rounded-full flex items-center justify-center">
-                    <Settings className="h-4 w-4 text-white" />
-                  </div>
-                )}
+      {/* Video Display Container */}
+      <div className="relative w-full h-full">
+        {/* Seamless Video Container - Contains dual video elements */}
+        <div 
+          ref={videoContainerRef}
+          className={cn(
+            "absolute inset-0 w-full h-full",
+            (useSeamlessMode && !useGESMode) || (useGESMode && useSeamlessMode) ? "block" : "hidden"
+          )}
+          onClick={togglePlayPause}
+        />
+        
+        {/* Legacy Single Video Element - Hidden when using seamless mode */}
+        <video
+          ref={singleVideoRef}
+          src={src}
+          className={cn(
+            "w-full h-full object-contain",
+            useSeamlessMode ? "hidden" : "block"
+          )}
+          onClick={togglePlayPause}
+        />
+        
+        {/* GES Status Overlay - Only show when needed */}
+        {useGESMode && (gesIsLoading || gesError || (!gesHasTimeline && clips && clips.length === 0)) && (
+          <div className="absolute inset-0 flex items-center justify-center bg-gray-900/80 text-white">
+            <div className="text-center">
+              <div className="text-xl mb-4 flex items-center justify-center">
+                <div className="w-8 h-8 mr-3 flex-shrink-0">
+                  {gesIsLoading ? (
+                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white"></div>
+                  ) : gesError ? (
+                    <div className="w-8 h-8 bg-red-500 rounded-full flex items-center justify-center">
+                      <Settings className="h-4 w-4 text-white" />
+                    </div>
+                  ) : (
+                    <div className="w-8 h-8 bg-gray-500 rounded-full flex items-center justify-center">
+                      <Settings className="h-4 w-4 text-white" />
+                    </div>
+                  )}
+                </div>
+                Video Timeline
               </div>
-              GStreamer Preview
+              
+              <div className="text-sm text-gray-400 mb-2">{getPlayerStatus()}</div>
+              
+              {gesError && (
+                <div className="text-red-400 text-xs mt-4 max-w-md bg-red-900/20 p-3 rounded border border-red-500/30">
+                  <div className="font-semibold mb-1">Error:</div>
+                  {gesError}
+                </div>
+              )}
+              
+              {!gesHasTimeline && !gesIsLoading && !gesError && (
+                <div className="text-xs text-gray-500 mt-4 max-w-md">
+                  Drag and drop video clips to the timeline to begin editing
+                </div>
+              )}
             </div>
-            
-            <div className="text-sm text-gray-400 mb-2">{getPlayerStatus()}</div>
-            
-            {/* Timeline clips count when available */}
-            {clips && clips.length > 0 && (
-              <div className="text-xs text-gray-500 mb-2">
-                {clips.filter(c => c.type === 'video').length} video clips, {clips.filter(c => c.type === 'audio').length} audio clips
-              </div>
-            )}
-            
-            {/* GES Status Indicator */}
-            <div className="flex items-center justify-center space-x-2 text-xs">
-              <div className={`w-2 h-2 rounded-full ${isGESAvailable ? 'bg-green-400' : 'bg-red-400'}`}></div>
-              <span>{isGESAvailable ? 'GES Available' : 'GES Unavailable'}</span>
-            </div>
-            
-            {gesError && (
-              <div className="text-red-400 text-xs mt-4 max-w-md bg-red-900/20 p-3 rounded border border-red-500/30">
-                <div className="font-semibold mb-1">Error:</div>
-                {gesError}
-              </div>
-            )}
-            
-            {/* Help text when no clips or not ready */}
-            {!gesHasTimeline && !gesIsLoading && !gesError && (
-              <div className="text-xs text-gray-500 mt-4 max-w-md">
-                Add video clips to the timeline to enable GES preview mode
-              </div>
-            )}
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
       {/* Video Controls */}
       <div 
@@ -378,16 +470,21 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
             )}
           </Button>
 
-          {/* Player Mode Toggle */}
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={togglePlayerMode}
-            className="text-white hover:bg-white/20 text-xs"
-            title={`Switch to ${useGESMode ? 'Timeline' : 'GES'} mode`}
-          >
-            {useGESMode ? 'GES' : 'TL'}
-          </Button>
+          {/* Seamless Mode Toggle */}
+          {!useGESMode && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={toggleSeamlessMode}
+              className={cn(
+                "text-white hover:bg-white/20",
+                useSeamlessMode ? "bg-green-500/20 border border-green-500/50" : "bg-gray-500/20"
+              )}
+              title={useSeamlessMode ? "Seamless Mode ON" : "Seamless Mode OFF"}
+            >
+              <RefreshCw className="h-4 w-4" />
+            </Button>
+          )}
 
           {/* Volume Controls */}
           <div className="flex items-center gap-2">
@@ -447,23 +544,14 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
           {rightControl}
         </div>
 
-        {/* Timestamp Display (Timeline mode only) */}
-        {!useGESMode && (
-          <div className="flex justify-end">
-            <span className="text-white text-xs font-mono">
-              {String(Math.floor(currentTime / 3600)).padStart(2, '0')}:
-              {String(Math.floor((currentTime % 3600) / 60)).padStart(2, '0')}:
-              {String(Math.floor(currentTime % 60)).padStart(2, '0')}
-            </span>
-          </div>
-        )}
-
-        {/* GES Mode Info */}
-        {useGESMode && (
-          <div className="text-center text-white text-xs opacity-75">
-            GES Preview Mode - Timeline controlled by GStreamer
-          </div>
-        )}
+        {/* Timestamp Display */}
+        <div className="flex justify-end">
+          <span className="text-white text-xs font-mono">
+            {String(Math.floor(currentTime / 3600)).padStart(2, '0')}:
+            {String(Math.floor((currentTime % 3600) / 60)).padStart(2, '0')}:
+            {String(Math.floor(currentTime % 60)).padStart(2, '0')}
+          </span>
+        </div>
       </div>
     </div>
   );

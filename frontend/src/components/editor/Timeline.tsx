@@ -60,34 +60,46 @@ const Timeline = forwardRef<HTMLDivElement, TimelineProps>(({
   onLayerSelect,
   selectedLayer,
 }, ref) => {
-  // Timeline markers integration
+  // Timeline markers integration - reduced debug logging
   const currentProjectId = useCurrentGESProjectId();
   const markersHook = useTimelineMarkers(currentProjectId || undefined);
   
   // Multi-selection support
   const multiSelection = useMultiSelection();
   
-  // GES integration
-  const gesClipsByLayer = useGESClipsByLayer(currentProjectId);
+  // GES integration - infinite loop issue resolved  
   const gesProjectActions = useGESProjectActions();
   
-  // Layer visibility state
-  const [layerVisibility, setLayerVisibility] = useState<Record<LayerType, boolean>>({
+  // Layer visibility state - using stable initializer to prevent re-creation
+  const [layerVisibility, setLayerVisibility] = useState<Record<LayerType, boolean>>(() => ({
     [LayerType.MAIN]: true,
     [LayerType.OVERLAY]: true,
     [LayerType.TEXT]: true,
     [LayerType.EFFECTS]: true,
     [LayerType.AUDIO]: true,
-  });
+  }));
   
-  // Layer lock state
-  const [layerLocked, setLayerLocked] = useState<Record<LayerType, boolean>>({
+  // Layer lock state - using stable initializer to prevent re-creation
+  const [layerLocked, setLayerLocked] = useState<Record<LayerType, boolean>>(() => ({
     [LayerType.MAIN]: false,
     [LayerType.OVERLAY]: false,
     [LayerType.TEXT]: false,
     [LayerType.EFFECTS]: false,
     [LayerType.AUDIO]: false,
-  });
+  }));
+  
+  // Debug logging for state setters - use proper typing
+  const debugSetLayerVisibility = (value: React.SetStateAction<Record<LayerType, boolean>>) => {
+    console.count('🚨 setLayerVisibility called');
+    console.trace('🚨 setLayerVisibility stack');
+    return setLayerVisibility(value);
+  };
+  
+  const debugSetLayerLocked = (value: React.SetStateAction<Record<LayerType, boolean>>) => {
+    console.count('🚨 setLayerLocked called');
+    console.trace('🚨 setLayerLocked stack');
+    return setLayerLocked(value);
+  };
   
   // Note: Auto-enable GES mode is handled by EditorContent to prevent infinite loops
   
@@ -138,6 +150,7 @@ const Timeline = forwardRef<HTMLDivElement, TimelineProps>(({
     },
   }), [multiSelection, onClipUpdate]);
 
+  // Timeline shortcuts integration
   const shortcutsHook = useTimelineShortcuts({
     ...shortcutCallbacks,
     clips,
@@ -164,7 +177,7 @@ const Timeline = forwardRef<HTMLDivElement, TimelineProps>(({
     }
     
     return styles;
-  }, [clips]); // Fixed: Use clips directly instead of creating new array on every render
+  }, [clips]);
 
   // Create a stable debounced function using useRef to prevent infinite loops
   const debouncedDurationAnalysisRef = useRef(
@@ -187,21 +200,23 @@ const Timeline = forwardRef<HTMLDivElement, TimelineProps>(({
     }, 500)
   );
 
-  // Trigger analysis when clips or duration change, but use a stable debounced function
+  // Trigger analysis when clips or duration change
   useEffect(() => {
     if (clips.length > 0) {
       debouncedDurationAnalysisRef.current();
     }
-  }, [clips.length, duration]); // Only depend on clips.length and duration, not the clips array itself
+  }, [clips.length, duration]);
 
   const timelineRef = useRef<HTMLDivElement>(null);
   
-  // Timeline state persistence - re-enabled after fixing debounced duration analysis
-  const persistence = useTimelinePersistence(currentProjectId, {
-    autoSaveEnabled: true,
+  // Timeline state persistence configuration
+  const persistenceConfig = useMemo(() => ({
+    autoSaveEnabled: true, // Re-enabled since infinite loop is fixed
     saveDebounceMs: 2000,
-    autoZoomPersistence: true
-  });
+    autoZoomPersistence: true // Re-enabled since infinite loop is fixed
+  }), []);
+  
+  const persistence = useTimelinePersistence(currentProjectId, persistenceConfig);
   
   // Use persisted state instead of local state
   const zoom = persistence.zoom;
@@ -259,16 +274,31 @@ const Timeline = forwardRef<HTMLDivElement, TimelineProps>(({
       }));
   }, []);
 
-  // Enhanced snap calculation using backend API
+  // Enhanced snap calculation using backend API - stabilized to prevent infinite loops
   const calculateSnapPosition = useCallback(async (
     targetPosition: number, 
     trackIndex: number, 
     excludeClipId?: string
   ): Promise<{ snappedPosition: number; snapType: string; snapped: boolean; insertionIndex: number }> => {
     try {
-      // Filter out the clip being dragged
-      const filteredClips = clips.filter(clip => clip.id !== excludeClipId);
-      const snapClips = convertClipsForSnapAPI(filteredClips, trackIndex);
+      // Get current clips directly from state to avoid stale closures
+      const currentClips = useEditorStore.getState().clips;
+      const filteredClips = currentClips.filter(clip => clip.id !== excludeClipId);
+      
+      // Use stable convertClipsForSnapAPI function
+      const snapClips = filteredClips
+        .filter(clip => clip.track === trackIndex)
+        .map(clip => ({
+          id: clip.id,
+          name: clip.name || clip.id,
+          start: clip.start,
+          end: clip.end,
+          duration: clip.end - clip.start,
+          file_path: (clip as any).asset || "",
+          type: clip.type || "video",
+          track: clip.track,
+          in_point: 0
+        }));
       
       const snapRequest: GESSnapRequest = {
         target_position: targetPosition,
@@ -293,7 +323,8 @@ const Timeline = forwardRef<HTMLDivElement, TimelineProps>(({
     }
     
     // Fallback to existing logic if API fails
-    const otherClipsOnTrack = clips.filter(c => c.id !== excludeClipId && c.track === trackIndex);
+    const currentClips = useEditorStore.getState().clips;
+    const otherClipsOnTrack = currentClips.filter(c => c.id !== excludeClipId && c.track === trackIndex);
     const sortedClips = otherClipsOnTrack.sort((a, b) => a.start - b.start);
     
     let insertionIndex = 0;
@@ -315,7 +346,47 @@ const Timeline = forwardRef<HTMLDivElement, TimelineProps>(({
       snapped: false,
       insertionIndex
     };
-  }, [clips, convertClipsForSnapAPI]);
+  }, []); // Remove all dependencies to prevent infinite loops
+
+  // Enhanced drop indicator with snap functionality - debounced to prevent infinite loops
+  const updateDropIndicatorRef = useRef(
+    debounce(async (e: React.DragEvent | React.MouseEvent, trackIndex: number) => {
+      const rect = resolvedRef.current?.getBoundingClientRect();
+      if (rect) {
+        const x = e.clientX - rect.left;
+        const rawDropTime = (x / rect.width) * duration;
+        
+        // Use snap API for enhanced positioning
+        const excludeClipId = draggingClip?.clipId;
+        const snapResult = await calculateSnapPosition(rawDropTime, trackIndex, excludeClipId);
+        
+        const finalDropTime = snapResult.snappedPosition;
+        
+        // Reduced logging during drag operations to prevent infinite loops
+        // Only log significant snap events, not every movement
+        if (snapResult.snapped) {
+          console.log('🎯 [Timeline] Snapped:', {
+            final: finalDropTime.toFixed(2),
+            type: snapResult.snapType
+          });
+        }
+        
+        // Update drop indicator with enhanced snap information
+        setDropIndicator({ 
+          track: trackIndex, 
+          time: finalDropTime, 
+          insertionIndex: snapResult.insertionIndex,
+          snapType: snapResult.snapType,
+          snapped: snapResult.snapped
+        });
+      }
+    }, 50) // Debounce by 50ms to prevent rapid-fire calls
+  );
+
+  // Wrapper function for the debounced updateDropIndicator
+  const updateDropIndicator = useCallback((e: React.DragEvent | React.MouseEvent, trackIndex: number) => {
+    updateDropIndicatorRef.current(e, trackIndex);
+  }, []); // No dependencies to prevent re-creation
 
   // Context menu action handler
   const handleContextMenuAction = useCallback((action: string, data?: { clipId?: string; timelinePosition?: number; menuType: 'clip' | 'timeline' | 'empty' }) => {
@@ -447,57 +518,78 @@ const Timeline = forwardRef<HTMLDivElement, TimelineProps>(({
   // Add effect to force duration recalculation when clips change - debounced to prevent excessive calls
   const debouncedRecalculateDuration = useCallback(
     debounce(() => {
-      if (clips.length > 0) {
-        const maxEnd = Math.max(...clips.map(clip => clip.end));
+      const currentClips = useEditorStore.getState().clips;
+      const currentDuration = useEditorStore.getState().duration;
+      
+      if (currentClips.length > 0) {
+        const maxEnd = Math.max(...currentClips.map(clip => clip.end));
         console.log("🎬 [Timeline] Calculated maxEnd:", maxEnd);
-        console.log("🎬 [Timeline] Current duration vs maxEnd:", duration, "vs", maxEnd);
+        console.log("🎬 [Timeline] Current duration vs maxEnd:", currentDuration, "vs", maxEnd);
         
         // If duration doesn't match, force recalculation
-        if (Math.abs(duration - maxEnd) > 0.1) {
+        if (Math.abs(currentDuration - maxEnd) > 0.1) {
           console.log("🎬 [Timeline] Duration mismatch detected, forcing recalculation");
           const { recalculateDuration } = useEditorStore.getState();
           recalculateDuration();
         }
       }
     }, 100), // Debounce by 100ms
-    [clips, duration]
+    [] // Remove dependencies to prevent infinite loops
   );
 
   useEffect(() => {
     // console.log("🎬 [Timeline] Clips changed, scheduling duration recalculation");
     debouncedRecalculateDuration();
-  }, [clips, debouncedRecalculateDuration]);
+  }, [clips.length, duration]); // Only depend on clips.length and duration, not the function or clips array
   
   // Get effective clips and calculate dynamic track count
   const effectiveClips = useMemo(() => {
     if (gesMode && currentProjectId) {
       const timelineClips: any[] = [];
       
-      Object.entries(gesClipsByLayer || {}).forEach(([layerStr, clips]) => {
-        const layer = parseInt(layerStr) as LayerType;
-        if (!layerVisibility[layer]) return;
+      // Get clips by layer directly from store to avoid dependency on the hook
+      const { gesProjects } = useEditorStore.getState();
+      const project = gesProjects[currentProjectId];
+      
+      if (project) {
+        const clipsByLayer: Record<LayerType, any[]> = {
+          [LayerType.MAIN]: [],
+          [LayerType.OVERLAY]: [],
+          [LayerType.TEXT]: [],
+          [LayerType.EFFECTS]: [],
+          [LayerType.AUDIO]: []
+        };
         
-        const clipArray = Array.isArray(clips) ? clips : [];
-        clipArray.forEach(clip => {
-          timelineClips.push({
-            id: clip.id,
-            start: clip.start_time,
-            end: clip.start_time + clip.duration,
-            track: layer,
-            type: clip.clip_type,
-            name: clip.metadata?.text || `Clip ${clip.id.slice(-4)}`,
-            text: clip.metadata?.text,
-            asset: clip.asset_id,
-            thumbnail: '',
-            _gesClip: clip
+        Object.values(project.clips).forEach(clip => {
+          clipsByLayer[clip.layer].push(clip);
+        });
+      
+        Object.entries(clipsByLayer).forEach(([layerStr, clips]) => {
+          const layer = parseInt(layerStr) as LayerType;
+          if (!layerVisibility[layer]) return;
+          
+          const clipArray = Array.isArray(clips) ? clips : [];
+          clipArray.forEach(clip => {
+            timelineClips.push({
+              id: clip.id,
+              start: clip.start_time,
+              end: clip.start_time + clip.duration,
+              track: layer,
+              type: clip.clip_type,
+              name: clip.metadata?.text || `Clip ${clip.id.slice(-4)}`,
+              text: clip.metadata?.text,
+              asset: clip.asset_id,
+              thumbnail: '',
+              _gesClip: clip
+            });
           });
         });
-      });
+      }
       
       return timelineClips;
     }
     return clips;
-  }, [gesMode, currentProjectId, gesClipsByLayer, layerVisibility, clips]);
+  }, [gesMode, currentProjectId, layerVisibility, clips]); // Removed gesClipsByLayer dependency
   
   const maxTrack = effectiveClips.length > 0 ? Math.max(...effectiveClips.map(clip => clip.track)) : 0;
   const trackCount = Math.max(maxTrack + 1, 3); // Minimum 3 tracks, expand as needed
@@ -598,15 +690,33 @@ const Timeline = forwardRef<HTMLDivElement, TimelineProps>(({
     return calculatedZoom;
   }, [resolvedRef, clips.length, duration, isAutoZoom]);
   
-  // Auto-zoom effect when content changes
+  // Auto-zoom effect when content changes - using refs to prevent infinite loops
+  const autoZoomTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  
   useEffect(() => {
     if (isAutoZoom && clips.length > 0) {
-      const optimalZoom = calculateOptimalZoom();
-      if (Math.abs(optimalZoom - zoom) > 0.1) { // Only update if significant change
-        persistence.updateZoom(optimalZoom);
+      // Clear previous timeout
+      if (autoZoomTimeoutRef.current) {
+        clearTimeout(autoZoomTimeoutRef.current);
       }
+      
+      autoZoomTimeoutRef.current = setTimeout(() => {
+        // Use ref to get current values to avoid stale closures
+        const currentZoom = persistence.zoom;
+        const optimalZoom = calculateOptimalZoom();
+        
+        if (Math.abs(optimalZoom - currentZoom) > 0.1) { // Only update if significant change
+          persistence.updateZoom(optimalZoom);
+        }
+      }, 200); // Increased delay to prevent rapid re-renders
+      
+      return () => {
+        if (autoZoomTimeoutRef.current) {
+          clearTimeout(autoZoomTimeoutRef.current);
+        }
+      };
     }
-  }, [clips.length, duration, isAutoZoom, calculateOptimalZoom, persistence]);
+  }, [clips.length, duration, isAutoZoom]); // Stable dependencies only
   
   // Effect to handle duration changes - log when duration changes
   useEffect(() => {
@@ -927,37 +1037,6 @@ const Timeline = forwardRef<HTMLDivElement, TimelineProps>(({
     target.style.borderLeftStyle = "dashed";
   };
   
-  // Enhanced drop indicator with snap functionality
-  const updateDropIndicator = useCallback(async (e: React.DragEvent | React.MouseEvent, trackIndex: number) => {
-    const rect = resolvedRef.current?.getBoundingClientRect();
-    if (rect) {
-      const x = e.clientX - rect.left;
-      const rawDropTime = (x / rect.width) * duration;
-      
-      // Use snap API for enhanced positioning
-      const excludeClipId = draggingClip?.clipId;
-      const snapResult = await calculateSnapPosition(rawDropTime, trackIndex, excludeClipId);
-      
-      const finalDropTime = snapResult.snappedPosition;
-      
-      console.log('🎯 [Timeline] Snap result:', {
-        raw: rawDropTime.toFixed(2),
-        final: finalDropTime.toFixed(2),
-        type: snapResult.snapType,
-        snapped: snapResult.snapped
-      });
-      
-      // Update drop indicator with enhanced snap information
-      setDropIndicator({ 
-        track: trackIndex, 
-        time: finalDropTime, 
-        insertionIndex: snapResult.insertionIndex,
-        snapType: snapResult.snapType,
-        snapped: snapResult.snapped
-      });
-    }
-  }, [duration, draggingClip, calculateSnapPosition, resolvedRef]);
-
   const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     e.stopPropagation(); // Prevent event from bubbling up to parent components

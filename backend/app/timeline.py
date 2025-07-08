@@ -45,15 +45,18 @@ class VideoClip(BaseClip):
     """
     Represents a video or audio clip on the timeline.
     start and end are in frames (integer), not seconds.
+    in_point represents the start time within the source media file (in frames).
     """
-    def __init__(self, name: str, start_frame: int, end_frame: int, track_type: str = "video", file_path: Optional[str] = None, clip_id: Optional[str] = None):
+    def __init__(self, name: str, start_frame: int, end_frame: int, track_type: str = "video", file_path: Optional[str] = None, clip_id: Optional[str] = None, in_point: int = 0, track_index: int = 0):
         self.clip_id: str = clip_id or str(uuid.uuid4())
         self.name: str = name
-        self.start: int = int(start_frame)  # in frames
-        self.end: int = int(end_frame)      # in frames
+        self.start: int = int(start_frame)  # Timeline position start in frames
+        self.end: int = int(end_frame)      # Timeline position end in frames
         self.track_type: str = track_type
         self.effects: list = []  # List[Effect]
         self.file_path: Optional[str] = file_path  # Path to the source video file
+        self.in_point: int = int(in_point)  # Start time within source media in frames
+        self.track_index: int = int(track_index)  # Track index this clip belongs to
 
     def add_effect(self, effect: 'Effect') -> None:
         """
@@ -81,6 +84,90 @@ class VideoClip(BaseClip):
         """
         return (self.start / timeline.frame_rate, self.end / timeline.frame_rate)
 
+    def get_duration_frames(self) -> int:
+        """
+        Get the duration of this clip in frames.
+        Returns:
+            int: Duration in frames
+        """
+        return self.end - self.start
+
+    def get_duration_seconds(self, timeline: 'Timeline') -> float:
+        """
+        Get the duration of this clip in seconds.
+        Args:
+            timeline (Timeline): The timeline for frame rate reference.
+        Returns:
+            float: Duration in seconds
+        """
+        return self.get_duration_frames() / timeline.frame_rate
+
+    def get_timeline_start_seconds(self, timeline: 'Timeline') -> float:
+        """
+        Get the timeline start position in seconds.
+        Args:
+            timeline (Timeline): The timeline for frame rate reference.
+        Returns:
+            float: Timeline start position in seconds
+        """
+        return self.start / timeline.frame_rate
+
+    def get_timeline_end_seconds(self, timeline: 'Timeline') -> float:
+        """
+        Get the timeline end position in seconds.
+        Args:
+            timeline (Timeline): The timeline for frame rate reference.
+        Returns:
+            float: Timeline end position in seconds
+        """
+        return self.end / timeline.frame_rate
+
+    def get_source_in_point_seconds(self, timeline: 'Timeline') -> float:
+        """
+        Get the in-point within source media in seconds.
+        Args:
+            timeline (Timeline): The timeline for frame rate reference.
+        Returns:
+            float: Source media in-point in seconds
+        """
+        return self.in_point / timeline.frame_rate
+
+    def get_source_duration_frames(self) -> int:
+        """
+        Get the duration of the source media section used by this clip.
+        Returns:
+            int: Source duration in frames (same as timeline duration)
+        """
+        return self.get_duration_frames()
+
+    def get_source_end_point(self) -> int:
+        """
+        Get the end point within the source media file.
+        Returns:
+            int: End point in source media in frames
+        """
+        return self.in_point + self.get_duration_frames()
+
+    def set_timeline_position(self, start_frame: int, end_frame: int) -> None:
+        """
+        Set the timeline position of this clip.
+        Args:
+            start_frame (int): New start position in timeline frames
+            end_frame (int): New end position in timeline frames
+        """
+        self.start = int(start_frame)
+        self.end = int(end_frame)
+
+    def move_to_timeline_position(self, new_start_frame: int) -> None:
+        """
+        Move this clip to a new timeline position, preserving duration.
+        Args:
+            new_start_frame (int): New start position in timeline frames
+        """
+        duration = self.get_duration_frames()
+        self.start = int(new_start_frame)
+        self.end = self.start + duration
+
     def to_dict(self) -> dict:
         """
         Serialize this VideoClip to a dictionary representation.
@@ -98,6 +185,33 @@ class VideoClip(BaseClip):
             "track_type": self.track_type,
             "effects": [effect.to_dict() for effect in self.effects],
             "file_path": self.file_path,
+            "in_point": int(round(self.in_point)),
+            "track_index": int(self.track_index),
+            # GES-compatible timeline position fields
+            "timeline_start": int(round(self.start)),
+            "timeline_end": int(round(self.end)),
+        }
+
+    def to_timeline_dict(self, timeline: 'Timeline') -> dict:
+        """
+        Serialize this VideoClip to a GES-compatible timeline representation in seconds.
+        This is used for timeline JSON schemas and API responses.
+        Args:
+            timeline (Timeline): The timeline for frame rate reference.
+        Returns:
+            dict: GES-compatible timeline representation in seconds.
+        """
+        return {
+            "id": self.clip_id,
+            "name": self.name,
+            "file_path": self.file_path,
+            "timeline_start": self.get_timeline_start_seconds(timeline),
+            "timeline_end": self.get_timeline_end_seconds(timeline),
+            "duration": self.get_duration_seconds(timeline),
+            "in_point": self.get_source_in_point_seconds(timeline),
+            "track": self.track_index,
+            "type": self.track_type,
+            "effects": [effect.to_dict() for effect in self.effects]
         }
 
     @staticmethod
@@ -114,19 +228,33 @@ class VideoClip(BaseClip):
         # Extensible: support custom subclasses via _type
         cls = globals().get(data.get("_type", "VideoClip"), VideoClip)
         frame_rate = data.get("frame_rate", 30)  # Use 30 if not present
-        start = data["start"]
-        end = data["end"]
+        
+        # Handle multiple timeline position formats for backward compatibility
+        start = data.get("start", data.get("timeline_start", 0))
+        end = data.get("end", data.get("timeline_end", 0))
+        
         # If end is suspiciously small, treat as seconds and convert to frames
         if end < 1000:
             start = int(round(start * frame_rate))
             end = int(round(end * frame_rate))
+        
+        # Handle new GES-like fields with backward compatibility
+        in_point = data.get("in_point", 0)
+        track_index = data.get("track_index", 0)
+        
+        # Convert in_point if it appears to be in seconds (for backward compatibility)
+        if "in_point" in data and in_point < 1000 and end >= 1000:
+            in_point = int(round(in_point * frame_rate))
+        
         clip = cls(
             name=data["name"],
             start_frame=start,
             end_frame=end,
             track_type=data.get("track_type", "video"),
             file_path=data.get("file_path"),
-            clip_id=data.get("clip_id")
+            clip_id=data.get("clip_id"),
+            in_point=in_point,
+            track_index=track_index
         )
         clip.effects = [Effect.from_dict(e) for e in data.get("effects", [])]
         return clip
@@ -261,12 +389,19 @@ class CompoundClip(BaseClip):
         Returns:
             CompoundClip: The deserialized instance
         """
-        # Support nested compound clips and extensibility
+        # Support nested compound clips with safe class mapping
         clips = []
         for c in data.get("clips", []):
             clip_type = c.get("_type", "VideoClip")
-            # Dynamic class lookup for extensibility
-            cls = globals().get(clip_type, VideoClip)
+            # Safe class mapping instead of dangerous globals() lookup
+            if clip_type in ["VideoClip", "CompoundClip"]:
+                if clip_type == "CompoundClip":
+                    cls = CompoundClip
+                else:
+                    cls = VideoClip
+            else:
+                # Default to VideoClip for unknown types
+                cls = VideoClip
             clips.append(cls.from_dict(c))
         compound = CompoundClip(
             name=data["name"],
@@ -375,13 +510,27 @@ class Track(BaseTrack):
         Returns:
             Track: The deserialized Track instance.
         """
-        # Extensible: support custom subclasses via _type
-        cls = globals().get(data.get("_type", "Track"), Track)
+        # Safe class mapping instead of dangerous globals() lookup
+        track_type = data.get("_type", "Track")
+        if track_type == "Track":
+            cls = Track
+        else:
+            # Default to Track for unknown types
+            cls = Track
+            
         track = cls(name=data["name"], track_type=data["track_type"])
         clips = []
         for c in data.get("clips", []):
             clip_type = c.get("_type", "VideoClip")
-            clip_cls = globals().get(clip_type, VideoClip)
+            # Safe class mapping for clips
+            if clip_type in ["VideoClip", "CompoundClip"]:
+                if clip_type == "CompoundClip":
+                    clip_cls = CompoundClip
+                else:
+                    clip_cls = VideoClip
+            else:
+                # Default to VideoClip for unknown types
+                clip_cls = VideoClip
             clips.append(clip_cls.from_dict(c))
         track.clips = clips
         return track
@@ -441,8 +590,14 @@ class Transition(BaseTransition):
         Returns:
             Transition: The deserialized Transition instance.
         """
-        # Extensible: support custom subclasses via _type
-        cls = globals().get(data.get("_type", "Transition"), Transition)
+        # Safe class mapping instead of dangerous globals() lookup
+        transition_type = data.get("_type", "Transition")
+        if transition_type == "Transition":
+            cls = Transition
+        else:
+            # Default to Transition for unknown types
+            cls = Transition
+            
         return cls(
             from_clip=data["from_clip"],
             to_clip=data["to_clip"],
@@ -518,8 +673,16 @@ class Effect(BaseEffect):
         Returns:
             Effect: The deserialized Effect instance.
         """
-        # Extensible: support custom subclasses via _type
-        cls = globals().get(data.get("_type", "Effect"), Effect)
+        # Safe class mapping instead of dangerous globals() lookup
+        effect_type = data.get("_type", "Effect")
+        
+        # Only allow known safe effect types to prevent memory corruption
+        if effect_type in ["Effect", "BaseEffect"]:
+            cls = Effect
+        else:
+            # Default to Effect for unknown types instead of using globals()
+            cls = Effect
+            
         return cls(
             effect_type=data["effect_type"],
             params=data.get("params", {}),
@@ -867,6 +1030,33 @@ class Timeline:
     def seconds_to_frames(self, seconds: float) -> int:
         """Convert seconds to frames using this timeline's frame rate."""
         return int(round(seconds * self.frame_rate))
+
+    def get_duration_seconds(self) -> float:
+        """
+        Calculate the total duration of the timeline in seconds.
+        Returns the maximum end time across all clips in all tracks.
+        
+        Returns:
+            float: Timeline duration in seconds
+        """
+        if not self.tracks:
+            return 0.0
+        
+        max_end_seconds = 0.0
+        for track in self.tracks:
+            for clip in track.clips:
+                if hasattr(clip, 'end'):
+                    clip_end_seconds = self.frames_to_seconds(clip.end)
+                    max_end_seconds = max(max_end_seconds, clip_end_seconds)
+                # Handle nested clips in CompoundClips
+                if hasattr(clip, 'flatten_clips'):
+                    nested_clips = clip.flatten_clips()
+                    for nested_clip in nested_clips:
+                        if hasattr(nested_clip, 'end'):
+                            nested_end_seconds = self.frames_to_seconds(nested_clip.end)
+                            max_end_seconds = max(max_end_seconds, nested_end_seconds)
+        
+        return max_end_seconds
 
     def to_dict(self) -> dict:
         """

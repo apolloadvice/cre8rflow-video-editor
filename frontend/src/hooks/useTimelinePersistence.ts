@@ -50,7 +50,8 @@ export const useTimelinePersistence = (
   projectId: string | null,
   config: TimelinePersistenceConfig = {}
 ) => {
-  const { toast } = useToast();
+  // Remove toast to prevent infinite loops - errors will be handled differently
+  // const { toast } = useToast();
   
   // Configuration with defaults
   const {
@@ -73,6 +74,13 @@ export const useTimelinePersistence = (
       timelineView: 'normal'
     }
   });
+  
+  // Debug logging for state updates - temporarily disabled
+  // const debugSetPersistedState = (value: React.SetStateAction<TimelinePersistedState>) => {
+  //   console.count('🚨 setPersistedState called');
+  //   console.trace('🚨 setPersistedState stack');
+  //   return setPersistedState(value);
+  // };
 
   // Persistence state and metrics
   const [isLoading, setIsLoading] = useState(false);
@@ -147,18 +155,19 @@ export const useTimelinePersistence = (
       }));
 
       // Don't show toast on first load failure - use defaults silently
-      if (metrics.loadCount > 0) {
-        toast({
-          title: "Failed to load timeline state",
-          description: "Using default settings",
-          variant: "destructive"
-        });
-      }
+      // Toast disabled to prevent infinite loops
+      // if (metrics.loadCount > 0) {
+      //   toast({
+      //     title: "Failed to load timeline state",
+      //     description: "Using default settings",
+      //     variant: "destructive"
+      //   });
+      // }
 
     } finally {
       setIsLoading(false);
     }
-  }, [projectId, loadOnMount, metrics.loadCount, toast]);
+  }, [projectId, loadOnMount, metrics.loadCount]); // Removed toast dependency
 
   // Save state to backend
   const savePersistedState = useCallback(async (state: TimelinePersistedState) => {
@@ -218,16 +227,17 @@ export const useTimelinePersistence = (
         pendingSaves: Math.max(0, prev.pendingSaves - 1)
       }));
 
-      toast({
-        title: "Failed to save timeline settings",
-        description: "Your changes may be lost",
-        variant: "destructive"
-      });
+      // Toast disabled to prevent infinite loops
+      // toast({
+      //   title: "Failed to save timeline settings",
+      //   description: "Your changes may be lost",
+      //   variant: "destructive"
+      // });
 
     } finally {
       setIsSaving(false);
     }
-  }, [projectId, autoSaveEnabled, toast]);
+  }, [projectId, autoSaveEnabled]); // Removed toast dependency
 
   // Debounced save function
   const debouncedSave = useCallback(

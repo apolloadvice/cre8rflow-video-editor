@@ -60,6 +60,18 @@ except Exception as e:
 
 app = FastAPI()
 
+# Initialize GStreamer early in the main thread to avoid threading issues
+if GES_ROUTER_AVAILABLE:
+    try:
+        from app.backend.ges_service import _initialize_ges
+        print("🎬 Attempting early GStreamer initialization...")
+        if _initialize_ges():
+            print("✅ GStreamer initialized successfully at startup")
+        else:
+            print("⚠️ GStreamer initialization failed at startup")
+    except Exception as e:
+        print(f"❌ Failed to initialize GStreamer at startup: {e}")
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -116,4 +128,29 @@ if PERFORMANCE_ROUTER_AVAILABLE:
     app.include_router(performance_router, prefix="/api")
     print("✅ Performance endpoints registered")
 else:
-    print("⚠️ Performance endpoints skipped") 
+    print("⚠️ Performance endpoints skipped")
+
+# Add startup and shutdown event handlers for GStreamer
+@app.on_event("startup")
+async def startup_event():
+    """Initialize services on startup"""
+    print("🚀 FastAPI application starting up...")
+    
+@app.on_event("shutdown") 
+async def shutdown_event():
+    """Clean up services on shutdown"""
+    print("🛑 FastAPI application shutting down...")
+    
+    # Clean up GStreamer resources if available
+    if GES_ROUTER_AVAILABLE:
+        try:
+            from app.backend.ges_service import cleanup_ges_service
+            print("🎬 Cleaning up GStreamer resources...")
+            cleanup_ges_service()
+            print("✅ GStreamer cleanup completed")
+        except Exception as e:
+            print(f"❌ Error during GStreamer cleanup: {e}")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000) 

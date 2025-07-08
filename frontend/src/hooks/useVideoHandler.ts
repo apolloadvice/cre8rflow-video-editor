@@ -323,7 +323,7 @@ export const useVideoHandler = () => {
       return;
     }
 
-    console.log("🎬 [Video Handler] Asset found:", asset.name, "file_path:", asset.file_path);
+    console.log("🎬 [Video Handler] Asset found:", asset.name, "file_path:", asset.file_path, "duration:", asset.duration);
 
     // Generate thumbnail from Supabase video URL FIRST
     let thumbnail = "";
@@ -355,9 +355,12 @@ export const useVideoHandler = () => {
     // Find the best track and position for this video clip
     const { track: bestTrack, startTime: adjustedStartTime } = findBestTrack(clips, 'video', dropTime, asset.duration);
 
-    console.log("🎬 [Video Handler] Creating clip with thumbnail:", {
+    console.log("🎬 [Video Handler] Creating clip with timing:", {
       name: asset.name,
       track: bestTrack,
+      adjustedStartTime,
+      assetDuration: asset.duration,
+      calculatedEnd: adjustedStartTime + asset.duration,
       hasThumbnail: !!thumbnail,
       thumbnailLength: thumbnail.length
     });
@@ -380,12 +383,7 @@ export const useVideoHandler = () => {
     const updatedClips = [...clips, newClip];
     setClips(updatedClips);
     
-    // Force recalculate duration after adding clip
-    setTimeout(() => {
-      const { recalculateDuration } = useEditorStore.getState();
-      console.log("🎬 [Video Handler] Manually calling recalculateDuration...");
-      recalculateDuration();
-    }, 100); // Small delay to ensure state is updated
+    // Duration will be recalculated automatically by the store
     
     setSelectedClipId(newClip.id);
     
@@ -527,12 +525,7 @@ export const useVideoHandler = () => {
       const updatedClips = [...clips, ...newClips];
       setClips(updatedClips);
       
-      // Force recalculate duration after adding multiple clips
-      setTimeout(() => {
-        const { recalculateDuration } = useEditorStore.getState();
-        console.log("🎬 [Video Handler] Manually calling recalculateDuration after multiple clip add...");
-        recalculateDuration();
-      }, 100); // Small delay to ensure state is updated
+      // Duration will be recalculated automatically by the store
       
       setSelectedClipId(newClips[newClips.length - 1].id); // Select the last added clip
       

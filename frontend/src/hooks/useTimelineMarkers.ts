@@ -44,8 +44,14 @@ interface MarkerResponse {
 }
 
 export const useTimelineMarkers = (projectId?: string) => {
-  const { toast } = useToast();
+  // Remove toast to prevent infinite loops - errors stored in state instead
+  const currentTimeRef = useRef(0);
+  const setCurrentTimeRef = useRef<((time: number) => void) | null>(null);
+  
+  // Get currentTime and setCurrentTime only once to prevent infinite re-renders
   const { currentTime, setCurrentTime } = useEditorStore();
+  currentTimeRef.current = currentTime;
+  setCurrentTimeRef.current = setCurrentTime;
   
   const [state, setState] = useState<MarkersState>({
     markers: [],
@@ -56,10 +62,10 @@ export const useTimelineMarkers = (projectId?: string) => {
 
   const keyListenerRef = useRef<((e: KeyboardEvent) => void) | null>(null);
 
-  // API base URL
+  // API base URL - constant, no need to include in dependencies
   const apiBaseUrl = 'http://localhost:8000/api';
 
-  // Load markers from backend
+  // Load markers from backend - stable dependencies
   const loadMarkers = useCallback(async () => {
     if (!projectId) return;
     
@@ -94,18 +100,16 @@ export const useTimelineMarkers = (projectId?: string) => {
         isLoading: false,
         error: error instanceof Error ? error.message : 'Failed to load markers'
       }));
-      
-      // Toast notification removed to prevent infinite loops
-      // Error is stored in state for UI to handle
     }
-  }, [projectId]); // Removed apiBaseUrl and toast from dependencies
+  }, [projectId]); // Only depend on projectId
 
-  // Add marker at current position or specified position
+  // Add marker - stable dependencies
   const addMarker = useCallback(async (markerData?: Partial<AddMarkerRequest>) => {
     if (!projectId) return false;
     
-    const position = markerData?.position ?? currentTime;
-    const name = markerData?.name || `Marker ${state.markers.length + 1}`;
+    const position = markerData?.position ?? currentTimeRef.current;
+    // Use functional state update to avoid depending on state.markers.length
+    const name = markerData?.name || `Marker`;
     const color = markerData?.color || '#ff0000';
     const note = markerData?.note || '';
     
@@ -132,7 +136,7 @@ export const useTimelineMarkers = (projectId?: string) => {
       const result: MarkerResponse = await response.json();
       
       if (result.success) {
-        // Add marker to local state
+        // Add marker to local state using functional update
         setState(prev => ({
           ...prev,
           markers: [...prev.markers, result.data.marker].sort((a, b) => a.position - b.position)
@@ -147,16 +151,14 @@ export const useTimelineMarkers = (projectId?: string) => {
       console.error('🎯 [Markers] ❌ Failed to add marker:', error);
       return false;
     }
-  }, [projectId, currentTime, state.markers.length]); // Removed apiBaseUrl and toast
+  }, [projectId]); // Only depend on projectId
 
-  // Remove marker by ID
+  // Remove marker by ID - stable dependencies
   const removeMarker = useCallback(async (markerId: string) => {
     if (!projectId) return false;
     
     try {
-      // Get marker name for logging (use current state)
-      const marker = state.markers.find(m => m.id === markerId);
-      console.log(`🎯 [Markers] Removing marker: ${marker?.name || markerId}`);
+      console.log(`🎯 [Markers] Removing marker: ${markerId}`);
       
       const response = await fetch(`${apiBaseUrl}/projects/${projectId}/timeline/markers/${markerId}`, {
         method: 'DELETE'
@@ -176,7 +178,7 @@ export const useTimelineMarkers = (projectId?: string) => {
           currentMarkerIndex: null // Reset current marker
         }));
         
-        console.log(`🎯 [Markers] ✅ Removed marker: ${marker?.name || markerId}`);
+        console.log(`🎯 [Markers] ✅ Removed marker: ${markerId}`);
         return true;
       } else {
         throw new Error(result.message);
@@ -185,79 +187,94 @@ export const useTimelineMarkers = (projectId?: string) => {
       console.error('🎯 [Markers] ❌ Failed to remove marker:', error);
       return false;
     }
-  }, [projectId]); // Only depend on projectId to prevent infinite loops
+  }, [projectId]); // Only depend on projectId
 
-  // Navigate to specific marker
+  // Navigate to specific marker - stable dependencies
   const goToMarker = useCallback((markerId: string) => {
-    const marker = state.markers.find(m => m.id === markerId);
-    if (marker) {
-      console.log(`🎯 [Markers] Navigating to marker: ${marker.name} at ${marker.position}s`);
-      setCurrentTime(marker.position);
-      
-      const markerIndex = state.markers.findIndex(m => m.id === markerId);
-      setState(prev => ({ ...prev, currentMarkerIndex: markerIndex }));
-    }
-  }, [setCurrentTime]); // Removed state.markers and toast to prevent infinite loops
-
-  // Navigate to next marker - simplified to prevent infinite loops
-  const goToNextMarker = useCallback(() => {
-    // Use current state directly instead of depending on it
-    const currentMarkers = state.markers;
-    const currentIndex = state.currentMarkerIndex;
-    
-    if (currentMarkers.length === 0) return;
-    
-    let nextIndex: number;
-    if (currentIndex === null) {
-      nextIndex = currentMarkers.findIndex(m => m.position > currentTime);
-      if (nextIndex === -1) nextIndex = 0;
-    } else {
-      nextIndex = (currentIndex + 1) % currentMarkers.length;
-    }
-    
-    const nextMarker = currentMarkers[nextIndex];
-    if (nextMarker) {
-      console.log(`🎯 [Markers] Next marker: ${nextMarker.name}`);
-      goToMarker(nextMarker.id);
-    }
-  }, [currentTime, goToMarker]); // Reduced dependencies
-
-  // Navigate to previous marker - simplified to prevent infinite loops
-  const goToPreviousMarker = useCallback(() => {
-    // Use current state directly instead of depending on it
-    const currentMarkers = state.markers;
-    const currentIndex = state.currentMarkerIndex;
-    
-    if (currentMarkers.length === 0) return;
-    
-    let prevIndex: number;
-    if (currentIndex === null) {
-      const markersBeforeCurrent = currentMarkers.filter(m => m.position < currentTime);
-      if (markersBeforeCurrent.length > 0) {
-        prevIndex = currentMarkers.indexOf(markersBeforeCurrent[markersBeforeCurrent.length - 1]);
-      } else {
-        prevIndex = currentMarkers.length - 1;
+    // Access current state inside the function to avoid dependencies
+    setState(currentState => {
+      const marker = currentState.markers.find(m => m.id === markerId);
+      if (marker) {
+        console.log(`🎯 [Markers] Navigating to marker: ${marker.name} at ${marker.position}s`);
+        if (setCurrentTimeRef.current) {
+          setCurrentTimeRef.current(marker.position);
+        }
+        
+        const markerIndex = currentState.markers.findIndex(m => m.id === markerId);
+        return { ...currentState, currentMarkerIndex: markerIndex };
       }
-    } else {
-      prevIndex = currentIndex === 0 ? currentMarkers.length - 1 : currentIndex - 1;
-    }
-    
-    const prevMarker = currentMarkers[prevIndex];
-    if (prevMarker) {
-      console.log(`🎯 [Markers] Previous marker: ${prevMarker.name}`);
-      goToMarker(prevMarker.id);
-    }
-  }, [currentTime, goToMarker]); // Reduced dependencies
+      return currentState;
+    });
+  }, []); // No dependencies needed
 
-  // Get marker at specific position (for click detection) - simplified
+  // Navigate to next marker - stable dependencies
+  const goToNextMarker = useCallback(() => {
+    setState(currentState => {
+      const { markers, currentMarkerIndex } = currentState;
+      
+      if (markers.length === 0) return currentState;
+      
+      let nextIndex: number;
+      if (currentMarkerIndex === null) {
+        nextIndex = markers.findIndex(m => m.position > currentTimeRef.current);
+        if (nextIndex === -1) nextIndex = 0;
+      } else {
+        nextIndex = (currentMarkerIndex + 1) % markers.length;
+      }
+      
+      const nextMarker = markers[nextIndex];
+      if (nextMarker) {
+        console.log(`🎯 [Markers] Next marker: ${nextMarker.name}`);
+        if (setCurrentTimeRef.current) {
+          setCurrentTimeRef.current(nextMarker.position);
+        }
+        return { ...currentState, currentMarkerIndex: nextIndex };
+      }
+      return currentState;
+    });
+  }, []); // No dependencies needed
+
+  // Navigate to previous marker - stable dependencies
+  const goToPreviousMarker = useCallback(() => {
+    setState(currentState => {
+      const { markers, currentMarkerIndex } = currentState;
+      
+      if (markers.length === 0) return currentState;
+      
+      let prevIndex: number;
+      if (currentMarkerIndex === null) {
+        const markersBeforeCurrent = markers.filter(m => m.position < currentTimeRef.current);
+        if (markersBeforeCurrent.length > 0) {
+          prevIndex = markers.indexOf(markersBeforeCurrent[markersBeforeCurrent.length - 1]);
+        } else {
+          prevIndex = markers.length - 1;
+        }
+      } else {
+        prevIndex = currentMarkerIndex === 0 ? markers.length - 1 : currentMarkerIndex - 1;
+      }
+      
+      const prevMarker = markers[prevIndex];
+      if (prevMarker) {
+        console.log(`🎯 [Markers] Previous marker: ${prevMarker.name}`);
+        if (setCurrentTimeRef.current) {
+          setCurrentTimeRef.current(prevMarker.position);
+        }
+        return { ...currentState, currentMarkerIndex: prevIndex };
+      }
+      return currentState;
+    });
+  }, []); // No dependencies needed
+
+  // Get marker at specific position (for click detection) - stable
   const getMarkerAtPosition = useCallback((position: number, tolerance: number = 0.5) => {
-    // Use current state directly to avoid dependency
-    return state.markers.find(marker => 
+    // Access state inside the function to avoid dependencies
+    const currentMarkers = state.markers;
+    return currentMarkers.find(marker => 
       Math.abs(marker.position - position) <= tolerance
     );
   }, []); // No dependencies to prevent re-creation
 
-  // Setup keyboard shortcuts - simplified to prevent infinite loops
+  // Setup keyboard shortcuts - stable dependencies
   const setupKeyboardShortcuts = useCallback(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // Only handle shortcuts if not typing in an input
@@ -294,13 +311,15 @@ export const useTimelineMarkers = (projectId?: string) => {
         case 'backspace':
           if (e.shiftKey) {
             e.preventDefault();
-            // Use current state to avoid dependency
-            const currentIndex = state.currentMarkerIndex;
-            const currentMarkers = state.markers;
-            if (currentIndex !== null && currentMarkers[currentIndex]) {
-              removeMarker(currentMarkers[currentIndex].id);
-              console.log('🎯 [Markers] ⌨️ Keyboard shortcut: Delete current marker (Shift+Del)');
-            }
+            // Access current state to avoid dependencies
+            setState(currentState => {
+              const { currentMarkerIndex, markers } = currentState;
+              if (currentMarkerIndex !== null && markers[currentMarkerIndex]) {
+                removeMarker(markers[currentMarkerIndex].id);
+                console.log('🎯 [Markers] ⌨️ Keyboard shortcut: Delete current marker (Shift+Del)');
+              }
+              return currentState;
+            });
           }
           break;
       }
@@ -312,7 +331,7 @@ export const useTimelineMarkers = (projectId?: string) => {
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [addMarker, goToNextMarker, goToPreviousMarker, removeMarker]); // Removed state dependencies
+  }, [addMarker, goToNextMarker, goToPreviousMarker, removeMarker]); // Keep necessary callback dependencies
 
   // Load markers when project changes
   useEffect(() => {

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { ResizablePanel, ResizablePanelGroup, ResizableHandle } from "@/components/ui/resizable";
 import VideoPlayer from "@/components/editor/VideoPlayer";
 import Timeline from "@/components/editor/Timeline";
@@ -102,12 +102,21 @@ const EditorContent = ({ isAssetPanelVisible = true, isEffectsPanelVisible = fal
   //   };
   // }, [setCurrentTime]);
 
-  // Auto-recalculate timeline duration when clips change
-  useEffect(() => {
+  // Auto-recalculate timeline duration when clips change - memoized to prevent infinite loops
+  const stableRecalculateDuration = useCallback(() => {
+    const { recalculateDuration } = useEditorStore.getState();
     console.log('🎬 [EditorContent] Clips changed, recalculating duration');
-    console.log('🎬 [EditorContent] Current clips:', clips);
     recalculateDuration();
-  }, [clips, recalculateDuration]);
+  }, []);
+
+  useEffect(() => {
+    // Only recalculate when clips actually change in a meaningful way
+    const timeoutId = setTimeout(() => {
+      stableRecalculateDuration();
+    }, 50); // Small delay to batch rapid changes
+    
+    return () => clearTimeout(timeoutId);
+  }, [clips.length]); // Only depend on clips.length, not the clips array or recalculateDuration function
 
   // Helper to build timeline object for backend
   function buildTimelineObject(clips: any[], frameRate = 30.0) {

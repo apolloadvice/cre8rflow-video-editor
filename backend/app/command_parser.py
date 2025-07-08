@@ -11,7 +11,13 @@ from app.command_handlers.fade import FadeCommandHandler
 from app.command_handlers.group_cut import GroupCutCommandHandler
 from app.command_handlers.remove import RemoveCommandHandler
 from app.utils import timestamp_to_frames
-import importlib
+# Import llm_parser statically instead of dynamically to avoid memory corruption
+try:
+    from app.llm_parser import parse_command_with_llm
+    LLM_PARSER_AVAILABLE = True
+except ImportError:
+    LLM_PARSER_AVAILABLE = False
+    parse_command_with_llm = None
 
 class CommandParser:
     """
@@ -43,11 +49,9 @@ class CommandParser:
         self.register_handler(FadeCommandHandler())
         self.register_handler(RemoveCommandHandler())
         # TODO: Register other handlers as they are refactored
-        self.use_llm = use_llm
-        # Import LLM parser only if needed (avoids dependency if not used)
-        self.llm_parser = None
-        if self.use_llm:
-            self.llm_parser = importlib.import_module("app.llm_parser")
+        self.use_llm = use_llm and LLM_PARSER_AVAILABLE
+        # Use static import instead of dangerous dynamic import
+        self.llm_parser_func = parse_command_with_llm if self.use_llm else None
 
     def register_handler(self, handler):
         self.handlers.append(handler)
@@ -65,8 +69,8 @@ class CommandParser:
             EditOperation or CompoundOperation: Structured representation of the command(s)
         """
         # Step 1: Try LLM parsing if enabled
-        if self.use_llm and self.llm_parser:
-            llm_result = self.llm_parser.parse_command_with_llm(command_text)
+        if self.use_llm and self.llm_parser_func:
+            llm_result = self.llm_parser_func(command_text)
             if llm_result:
                 # If the LLM returns a list, treat as compound
                 if isinstance(llm_result, list):
