@@ -9,7 +9,7 @@ Provides a function to parse natural language video editing commands using the O
 """
 import os
 from typing import Optional, Dict, Any, Tuple
-import openai
+from openai import OpenAI
 import logging
 import re
 
@@ -146,12 +146,15 @@ def parse_command_with_llm(command_text: str, duration: float = None) -> Tuple[O
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     if not OPENAI_API_KEY:
         return None, "OPENAI_API_KEY environment variable not set."
-    openai.api_key = OPENAI_API_KEY
+    
+    # Initialize OpenAI client with the API key
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    
     logging.info(f"[LLM] Input command: {command_text}")
     if duration is None:
         duration = 60.0  # fallback default
     try:
-        response = openai.chat.completions.create(
+        response = client.chat.completions.create(
             model="gpt-4",
             messages=[
                 {"role": "system", "content": build_system_prompt(duration)},
