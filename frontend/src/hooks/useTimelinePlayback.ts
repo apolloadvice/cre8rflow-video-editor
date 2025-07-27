@@ -175,8 +175,9 @@ export const useTimelinePlayback = (videoRef: React.RefObject<HTMLVideoElement>)
       console.log(`🎬 [Timeline] Clip loaded successfully:`, loaded);
       if (!loaded) return;
 
-      // Calculate the position within the clip
-      const clipStartTime = currentTime - currentClip.start;
+      // ✅ OTIO FIX: Calculate position within clip including source range offset
+      const clipStartTime = currentTime - currentClip.start + (currentClip.in_point || 0);
+      console.log(`🎬 [TimelinePlayback] OTIO position calc: timeline=${currentTime}s, clipStart=${currentClip.start}s, inPoint=${currentClip.in_point || 0}s → video=${clipStartTime}s`);
       
       if (videoRef.current) {
         videoRef.current.currentTime = clipStartTime;
@@ -280,9 +281,9 @@ export const useTimelinePlayback = (videoRef: React.RefObject<HTMLVideoElement>)
       } : 'None');
       
       if (currentClip) {
-        // We're in a clip
-        const clipPosition = newTimelineTime - currentClip.start;
-        console.log(`🔍 [Timeline] Should be at position ${clipPosition.toFixed(2)}s within clip`);
+        // We're in a clip - ✅ OTIO FIX: Include in_point offset
+        const clipPosition = newTimelineTime - currentClip.start + (currentClip.in_point || 0);
+        console.log(`🔍 [Timeline] OTIO position: timeline=${newTimelineTime.toFixed(2)}s, clipStart=${currentClip.start}s, inPoint=${currentClip.in_point || 0}s → video=${clipPosition.toFixed(2)}s`);
         
         if (currentClip.id !== playbackState.currentClipId) {
           // We've entered a new clip - load it
@@ -292,9 +293,9 @@ export const useTimelinePlayback = (videoRef: React.RefObject<HTMLVideoElement>)
           loadClip(currentClip).then((loaded) => {
             console.log(`🎬 [Timeline] Clip load result for ${currentClip.name}:`, loaded);
             if (loaded && videoRef.current) {
-              // Calculate position within the clip
-              const updatedClipPosition = newTimelineTime - currentClip.start;
-              console.log(`🎬 [Timeline] Setting video time to ${updatedClipPosition.toFixed(2)}s within clip`);
+              // ✅ OTIO FIX: Calculate position within clip including source range offset  
+              const updatedClipPosition = newTimelineTime - currentClip.start + (currentClip.in_point || 0);
+              console.log(`🎬 [Timeline] OTIO video position: timeline=${newTimelineTime.toFixed(2)}s, clipStart=${currentClip.start}s, inPoint=${currentClip.in_point || 0}s → video=${updatedClipPosition.toFixed(2)}s`);
               console.log(`🎬 [Timeline] Video before time set:`, {
                 currentTime: videoRef.current.currentTime.toFixed(2),
                 readyState: videoRef.current.readyState,

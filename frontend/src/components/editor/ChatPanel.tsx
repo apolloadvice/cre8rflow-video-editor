@@ -61,6 +61,8 @@ const ChatPanel = ({ onChatCommand, onVideoProcessed }: ChatPanelProps) => {
   // Ref for the textarea to handle keyboard shortcuts
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+
+
   // Debug component lifecycle
   useEffect(() => {
     debugLog('ChatPanel', 'Component mounted');
@@ -643,6 +645,126 @@ const ChatPanel = ({ onChatCommand, onVideoProcessed }: ChatPanelProps) => {
     try {
       debugLog('ChatPanel', 'Starting command parsing', { input, assetPath });
 
+      // OTIO SYSTEM: Detect "cut out" commands and use new OTIO timeline API
+      const cutOutMatch = input.match(/cut\s+out\s+(\d{1,2}:\d{2}|\d+)\s*[-–]\s*(\d{1,2}:\d{2}|\d+)/i);
+      if (cutOutMatch) {
+        debugLog('ChatPanel', 'OTIO: Detected cut out command, using new OTIO timeline system');
+        safeSetStatus("Processing with OTIO timeline system...");
+        
+        try {
+          debugLog('ChatPanel', 'Using new OTIO command API', { command: input, assetPath });
+
+          // Call the new OTIO command API v2 for better response handling
+          const response = await fetch('/api/command/v2', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              command: input,
+              asset_path: assetPath,
+              timeline_format: "otio",
+              migration_mode: true
+            })
+          });
+
+          if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.message || 'OTIO command failed');
+          }
+
+          const otioResult = await response.json();
+          debugLog('ChatPanel', 'OTIO command result', otioResult);
+
+          if (otioResult.status === 'success' || otioResult.status === 'ok') {
+            // OTIO system handled the cut operation successfully
+            debugLog('ChatPanel', 'OTIO cut operation succeeded', otioResult);
+            
+            // ✅ UPDATE FRONTEND TIMELINE: Convert OTIO response to frontend clips
+            if (otioResult.timeline) {
+              debugLog('ChatPanel', 'Received updated timeline from OTIO', otioResult.timeline);
+              
+              try {
+                // Import timeline adapter to convert OTIO to frontend format
+                const { TimelineAdapter } = await import('@/utils/timelineAdapter');
+                const adapter = new TimelineAdapter(otioResult.timeline); // Auto-detects OTIO format
+                const updatedClips = adapter.getClipsForAPI();
+                
+                debugLog('ChatPanel', 'Converted OTIO timeline to frontend clips', {
+                  originalClipCount: clips.length,
+                  newClipCount: updatedClips.length,
+                  updatedClips: updatedClips
+                });
+                
+                // Update the frontend store with the new clips
+                setClips(updatedClips);
+                
+                // 🔧 FORCE REFRESH: Clear any cached clip data to ensure seamless player gets updated clips
+                setTimeout(() => {
+                  const { recalculateDuration } = useEditorStore.getState();
+                  recalculateDuration();
+                  
+                  // Force clips state update by triggering a re-render
+                  const currentClips = useEditorStore.getState().clips;
+                  debugLog('ChatPanel', 'Forcing clip refresh after OTIO update', {
+                    clipCount: currentClips.length,
+                    clip1_inPoint: currentClips[0]?.in_point,
+                    clip2_inPoint: currentClips[1]?.in_point
+                  });
+                }, 100);
+                
+                debugLog('ChatPanel', 'Timeline updated successfully with OTIO response');
+                
+              } catch (conversionError) {
+                console.error('ChatPanel', 'Failed to convert OTIO timeline to frontend format:', conversionError);
+                // Still show success since the backend operation worked
+                debugLog('ChatPanel', 'Backend operation succeeded but frontend conversion failed', conversionError);
+              }
+            }
+            
+            clearStatusTimers();
+            safeSetStatus(null);
+            toast({
+              title: "Cut operation successful",
+              description: otioResult.message || "Successfully processed with OTIO timeline system",
+            });
+            safeSetIsThinking(false);
+            safeSetMessages((prev) => [...prev, {
+              id: Date.now().toString() + "-assistant",
+              content: `✅ ${otioResult.message || "Cut operation completed successfully using the new OTIO timeline system!"}`,
+              sender: "assistant",
+              timestamp: new Date(),
+            }]);
+            
+            // Optionally: Update timeline if response includes timeline data
+            if (otioResult.timeline) {
+              debugLog('ChatPanel', 'Received updated timeline from OTIO', otioResult.timeline);
+            }
+            
+            return;
+          } else {
+            throw new Error(otioResult.message || 'OTIO operation failed');
+          }
+        } catch (otioError) {
+          debugLog('ChatPanel', 'OTIO cut operation failed', otioError);
+          toast({
+            title: "Cut operation failed",
+            description: otioError.message || "Could not process the cut command",
+            variant: "destructive",
+          });
+          clearStatusTimers();
+          safeSetStatus(null);
+          safeSetIsThinking(false);
+          safeSetMessages((prev) => [...prev, {
+            id: Date.now().toString() + "-assistant",
+            content: `❌ Cut operation failed: ${otioError.message || "Unknown error"}`,
+            sender: "assistant",
+            timestamp: new Date(),
+          }]);
+          return;
+        }
+      }
+
     // Step 1: Parsing
       safeSetStatus("I'm reading your instructions…");
     const { parsed, error } = await parseCommand(input, assetPath);
@@ -1173,6 +1295,7 @@ const ChatPanel = ({ onChatCommand, onVideoProcessed }: ChatPanelProps) => {
               )
             ))}
           </div>
+
           <form className="flex w-full items-end gap-2" onSubmit={handleSubmit}>
             <Textarea
               placeholder="Tell me what edits to apply to your video... (e.g. 'cut 0-5', 'add text at 10s saying Welcome')&#10;&#10;💡 Tip: Press Enter to send, Shift+Enter for new line, Cmd+A to select all"

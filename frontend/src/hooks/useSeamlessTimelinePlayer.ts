@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useEditorStore } from '@/store/editorStore';
+import { useEditorStore, findClipAtTimelinePosition } from '@/store/editorStore';
 import { supabase } from '@/integrations/supabase/client';
 
 interface TimelineClip {
@@ -10,6 +10,7 @@ interface TimelineClip {
   duration: number;
   file_path: string;
   type: string;
+  in_point: number; // Position in source video file (seconds)
   signedUrl?: string;
 }
 
@@ -19,6 +20,9 @@ interface PlaybackState {
   timelineStartPosition: number;
   currentClip?: TimelineClip;
   nextClip?: TimelineClip;
+  isInGap?: boolean;
+  gapStart?: number;
+  gapEnd?: number;
 }
 
 interface VideoElement {
@@ -151,18 +155,29 @@ export const useSeamlessTimelinePlayer = (
       duration: clip.end - clip.start,
       file_path: clip.file_path || '',
       type: clip.type,
+      in_point: clip.in_point || 0, // Include in_point for proper video positioning
       signedUrl: 'signedUrl' in clip ? clip.signedUrl : undefined
     }));
+    
+    console.log('🔧 [SeamlessPlayer] Mapped timeline clips with in_point values:', mappedClips.map(c => ({
+      name: c.name,
+      start: c.start,
+      end: c.end,
+      in_point: c.in_point
+    })));
     
     setTimelineClips(mappedClips);
     
     // Preload the first video for immediate playback
     if (mappedClips.length > 0 && mappedClips[0].signedUrl && videoARef.current) {
       try {
+        const firstClip = mappedClips[0];
         const video = videoARef.current;
-        video.src = mappedClips[0].signedUrl;
+        video.src = firstClip.signedUrl;
+        video.currentTime = firstClip.in_point; // ✅ FIX: Set to in_point for cut clips
         video.load();
-        setVideoSrc(mappedClips[0].signedUrl);
+        setVideoSrc(firstClip.signedUrl);
+        console.log(`🔄 [SeamlessPlayer] Preloaded first clip "${firstClip.name}" in video A with in_point: ${firstClip.in_point}s`);
       } catch (error) {
         console.error('Error preloading first clip:', error);
       }
@@ -171,28 +186,56 @@ export const useSeamlessTimelinePlayer = (
     return mappedClips;
   }, [clips, setVideoSrc]);
 
-  // Find clip at specific timeline time
-  const findClipAtTime = useCallback((time: number): TimelineClip | null => {
-    if (timelineClips.length === 0) return null;
-
-    let left = 0;
-    let right = timelineClips.length - 1;
-
-    while (left <= right) {
-      const mid = Math.floor((left + right) / 2);
-      const clip = timelineClips[mid];
-
-      if (time >= clip.start && time < clip.end) {
-        return clip;
-      } else if (time < clip.start) {
-        right = mid - 1;
-      } else {
-        left = mid + 1;
-      }
+  // Find clip at specific timeline time with gap awareness
+  const findClipAtTimeWithGaps = useCallback((time: number): { 
+    clip: TimelineClip | null; 
+    isInGap: boolean; 
+    gapStart?: number; 
+    gapEnd?: number; 
+  } => {
+    if (timelineClips.length === 0) {
+      return { clip: null, isInGap: false };
     }
 
-    return null;
+    // Convert TimelineClip[] to Clip[] format for the gap-aware function
+    const clipsForGapCheck = timelineClips.map(tc => ({
+      id: tc.id,
+      name: tc.name,
+      start: tc.start,
+      end: tc.end,
+      duration: tc.duration,
+      in_point: tc.in_point, // Use actual in_point for proper video positioning
+      track: 0,
+      type: tc.type,
+      file_path: tc.file_path
+    }));
+
+    const result = findClipAtTimelinePosition(clipsForGapCheck, time);
+    
+    if (result.clip) {
+      // Find the corresponding TimelineClip with signedUrl
+      const timelineClip = timelineClips.find(tc => tc.id === result.clip!.id);
+      return {
+        clip: timelineClip || null,
+        isInGap: false
+      };
+    } else if (result.isInGap) {
+      return {
+        clip: null,
+        isInGap: true,
+        gapStart: result.gapStart,
+        gapEnd: result.gapEnd
+      };
+    }
+
+    return { clip: null, isInGap: false };
   }, [timelineClips]);
+
+  // Legacy function for compatibility - now uses gap-aware logic
+  const findClipAtTime = useCallback((time: number): TimelineClip | null => {
+    const result = findClipAtTimeWithGaps(time);
+    return result.clip;
+  }, [findClipAtTimeWithGaps]);
 
   // Find next clip after current time
   const findNextClip = useCallback((currentClip: TimelineClip | null): TimelineClip | null => {
@@ -208,6 +251,10 @@ export const useSeamlessTimelinePlayer = (
     
     if (!currentActive || !nextActive) return;
 
+    console.log(`🔄 [SeamlessPlayer] SWITCHING VIDEOS: ${activeVideo} → ${activeVideo === 'A' ? 'B' : 'A'}`);
+    console.log(`🔄 [SeamlessPlayer] Current video ${activeVideo} src:`, currentActive.src);
+    console.log(`🔄 [SeamlessPlayer] Next video ${activeVideo === 'A' ? 'B' : 'A'} src:`, nextActive.src);
+
     // Hide current video
     currentActive.style.display = 'none';
     currentActive.pause();
@@ -216,9 +263,10 @@ export const useSeamlessTimelinePlayer = (
     nextActive.style.display = 'block';
     
     // Switch active video reference
-    setActiveVideo(activeVideo === 'A' ? 'B' : 'A');
+    const newActiveVideo = activeVideo === 'A' ? 'B' : 'A';
+    setActiveVideo(newActiveVideo);
     
-    console.log(`🔄 [SeamlessPlayer] Switched from video ${activeVideo} to video ${activeVideo === 'A' ? 'B' : 'A'}`);
+    console.log(`🔄 [SeamlessPlayer] Switched from video ${activeVideo} to video ${newActiveVideo}`);
   }, [activeVideo, getActiveVideo, getNextVideo]);
 
   // Preload clip in next video element
@@ -227,10 +275,19 @@ export const useSeamlessTimelinePlayer = (
     if (!nextVideo || !clip.signedUrl) return false;
 
     try {
-      console.log(`🔄 [SeamlessPlayer] Preloading next clip: ${clip.name}`);
+      console.log(`🔄 [SeamlessPlayer] Preloading next clip: ${clip.name} in video ${activeVideo === 'A' ? 'B' : 'A'}`);
+      console.log(`🔧 [SeamlessPlayer] PRELOAD DEBUG: Setting up next clip with in_point offset`, {
+        clipName: clip.name,
+        clipStart: clip.start,
+        clipEnd: clip.end,
+        clipInPoint: clip.in_point,
+        clipDuration: clip.duration,
+        willSetVideoTime: clip.in_point,
+        nextVideoElement: activeVideo === 'A' ? 'B' : 'A'
+      });
       
       nextVideo.src = clip.signedUrl;
-      nextVideo.currentTime = 0; // Start from beginning of next clip
+      nextVideo.currentTime = clip.in_point; // ✅ FIX: Start from in_point offset for cut clips
       nextVideo.load();
       
       // Wait for preload to complete
@@ -329,6 +386,15 @@ export const useSeamlessTimelinePlayer = (
               // Start playing the next video
               const nextVideo = getNextVideo();
               if (nextVideo) {
+                // ✅ CRITICAL FIX: Ensure currentTime is set to in_point before playing
+                const clipPosition = nextClip.in_point;
+                nextVideo.currentTime = clipPosition;
+                console.log(`🔧 [SeamlessPlayer] SEAMLESS SWITCH: Setting next clip position to in_point`, {
+                  nextClipName: nextClip.name,
+                  nextClipInPoint: nextClip.in_point,
+                  setVideoTime: clipPosition
+                });
+                
                 nextVideo.play().catch(error => {
                   console.error('Error playing next clip:', error);
                 });
@@ -347,8 +413,50 @@ export const useSeamlessTimelinePlayer = (
           // Update timeline position based on current video time
           const currentClip = playbackState.currentClip;
           if (currentClip) {
-            const timelinePosition = currentClip.start + video.currentTime;
+            // ✅ CRITICAL FIX: Account for in_point offset when calculating timeline position
+            const timelinePosition = currentClip.start + (video.currentTime - currentClip.in_point);
             setCurrentTime(timelinePosition);
+            
+            // ✅ CRITICAL FIX: Enforce clip boundaries - stop video when clip ends
+            const clipEndInVideoTime = currentClip.in_point + currentClip.duration;
+            if (video.currentTime >= clipEndInVideoTime) {
+              console.log(`🛑 [SeamlessPlayer] Video ${videoId} reached clip end (${clipEndInVideoTime}s), triggering clip end`);
+              video.pause();
+              
+              // Trigger the onEnded handler to switch to next clip
+              if (playbackState.isPlaying) {
+                // Find and switch to next clip
+                const nextClip = findNextClip(currentClip);
+                if (nextClip) {
+                  console.log(`🎬 [SeamlessPlayer] Switching from clip "${currentClip.name}" to "${nextClip.name}"`);
+                  switchActiveVideo();
+                  
+                  // Update playback state
+                  setPlaybackState(prev => ({
+                    ...prev,
+                    currentClip: nextClip,
+                    timelineStartPosition: nextClip.start,
+                    startTime: Date.now()
+                  }));
+                  
+                  // Start playing the next video
+                  const nextVideo = getNextVideo();
+                  if (nextVideo) {
+                    const clipPosition = nextClip.in_point;
+                    nextVideo.currentTime = clipPosition;
+                    console.log(`🔧 [SeamlessPlayer] Starting next clip at in_point: ${clipPosition}s`);
+                    
+                    nextVideo.play().catch(error => {
+                      console.error('Error playing next clip:', error);
+                    });
+                  }
+                } else {
+                  // No more clips, stop playback
+                  console.log('🏁 [SeamlessPlayer] No more clips - stopping playback');
+                  stopPlayback();
+                }
+              }
+            }
           }
         }
       };
@@ -373,42 +481,91 @@ export const useSeamlessTimelinePlayer = (
     };
   }, [activeVideo, playbackState, switchActiveVideo, getNextVideo, findNextClip, preloadNextClip, setCurrentTime]);
 
-  // Start timeline playback
+  // Start timeline playback with gap awareness
   const startPlayback = useCallback(async () => {
     if (playbackState.isPlaying) return;
 
     console.log(`▶️ [SeamlessPlayer] Starting playback at ${currentTime.toFixed(2)}s`);
     
-    const currentClip = findClipAtTime(currentTime);
-    console.log(`▶️ [SeamlessPlayer] Current clip at ${currentTime.toFixed(2)}s:`, currentClip?.name || 'none');
+    // Use gap-aware clip detection
+    const timelineState = findClipAtTimeWithGaps(currentTime);
+    console.log(`▶️ [SeamlessPlayer] Timeline state at ${currentTime.toFixed(2)}s:`, {
+      clip: timelineState.clip?.name || 'none',
+      isInGap: timelineState.isInGap,
+      gapRange: timelineState.isInGap ? `${timelineState.gapStart?.toFixed(2)}-${timelineState.gapEnd?.toFixed(2)}s` : 'none'
+    });
+    console.log(`🔧 [SeamlessPlayer] CLIP LOOKUP DEBUG:`, {
+      requestedTime: currentTime,
+      foundClip: timelineState.clip ? {
+        name: timelineState.clip.name,
+        id: timelineState.clip.id,
+        start: timelineState.clip.start,
+        end: timelineState.clip.end,
+        in_point: timelineState.clip.in_point
+      } : null,
+      totalTimelineClips: timelineClips.length,
+      allClips: timelineClips.map(c => ({name: c.name, start: c.start, end: c.end, in_point: c.in_point}))
+    });
     
-    if (currentClip && currentClip.signedUrl) {
+    if (timelineState.isInGap) {
+      // We're in a gap - continue timeline progression but don't play video
+      console.log(`⏸️ [SeamlessPlayer] In gap (${timelineState.gapStart?.toFixed(2)}-${timelineState.gapEnd?.toFixed(2)}s) - timeline continues without video`);
+      
+      // Set gap playback state
+      setPlaybackState({
+        isPlaying: true,
+        startTime: Date.now(),
+        timelineStartPosition: currentTime,
+        currentClip: undefined,
+        isInGap: true,
+        gapStart: timelineState.gapStart,
+        gapEnd: timelineState.gapEnd
+      });
+      
+      // Start gap progression timer
+      startGapProgression(timelineState.gapEnd!);
+      
+    } else if (timelineState.clip && timelineState.clip.signedUrl) {
       const activeVideoEl = getActiveVideo();
       if (!activeVideoEl) return;
 
       try {
         // Setup current clip in active video
-        if (activeVideoEl.src !== currentClip.signedUrl) {
-          activeVideoEl.src = currentClip.signedUrl;
+        if (activeVideoEl.src !== timelineState.clip.signedUrl) {
+          console.log(`🔄 [SeamlessPlayer] Loading new video source for clip "${timelineState.clip.name}" in video ${activeVideo}`);
+          activeVideoEl.src = timelineState.clip.signedUrl;
           activeVideoEl.load();
+        } else {
+          console.log(`🔄 [SeamlessPlayer] Video source already loaded for clip "${timelineState.clip.name}" in video ${activeVideo}`);
         }
         
-        // Set position within the clip
-        const clipPosition = currentTime - currentClip.start;
+        // Set position within the clip, accounting for in_point offset
+        const clipPosition = currentTime - timelineState.clip.start + timelineState.clip.in_point;
         activeVideoEl.currentTime = Math.max(0, clipPosition);
+        console.log(`🎬 [SeamlessPlayer] Setting video position: timeline=${currentTime}s, clipStart=${timelineState.clip.start}s, inPoint=${timelineState.clip.in_point}s → video=${clipPosition}s`);
+        console.log(`🔧 [SeamlessPlayer] DETAILED CLIP DEBUG:`, {
+          clipName: timelineState.clip.name,
+          clipId: timelineState.clip.id,
+          clipStart: timelineState.clip.start,
+          clipEnd: timelineState.clip.end,
+          clipInPoint: timelineState.clip.in_point,
+          clipDuration: timelineState.clip.duration,
+          allTimelineClips: timelineClips.map(c => ({name: c.name, start: c.start, end: c.end, in_point: c.in_point}))
+        });
         
         // Set playing state
         setPlaybackState({
           isPlaying: true,
           startTime: Date.now(),
           timelineStartPosition: currentTime,
-          currentClip
+          currentClip: timelineState.clip,
+          isInGap: false
         });
         
         // Start playback
         await activeVideoEl.play();
         
-        console.log(`▶️ [SeamlessPlayer] Started playing: ${currentClip.name}`);
+        console.log(`▶️ [SeamlessPlayer] Started playing: ${timelineState.clip.name}`);
       } catch (error) {
         console.error('Error starting playback:', error);
         setPlaybackState(prev => ({ ...prev, isPlaying: false }));
@@ -422,7 +579,59 @@ export const useSeamlessTimelinePlayer = (
         setTimeout(() => startPlayback(), 50);
       }
     }
-  }, [currentTime, findClipAtTime, timelineClips, playbackState.isPlaying, setCurrentTime, getActiveVideo]);
+  }, [currentTime, findClipAtTimeWithGaps, timelineClips, playbackState.isPlaying, setCurrentTime, getActiveVideo]);
+
+  // Handle timeline progression during gaps
+  const startGapProgression = useCallback((gapEndTime: number) => {
+    const progressGap = () => {
+      if (!playbackState.isPlaying || !playbackState.isInGap) return;
+      
+      const elapsed = (Date.now() - playbackState.startTime) / 1000;
+      const newTimelineTime = playbackState.timelineStartPosition + elapsed;
+      
+      if (newTimelineTime >= gapEndTime) {
+        // Gap ended, find next clip and resume playback
+        console.log(`⏭️ [SeamlessPlayer] Gap ended at ${gapEndTime.toFixed(2)}s, seeking next clip`);
+        setCurrentTime(gapEndTime);
+        
+        // Look for clip at gap end position
+        const nextTimelineState = findClipAtTimeWithGaps(gapEndTime);
+        if (nextTimelineState.clip) {
+          // Resume normal playback with next clip
+          setTimeout(() => startPlayback(), 50);
+        } else {
+          // Still in gap or no more clips
+          const nextClip = timelineClips.find(clip => clip.start > gapEndTime);
+          if (nextClip) {
+            setCurrentTime(nextClip.start);
+            setTimeout(() => startPlayback(), 50);
+          } else {
+            // No more clips, stop playback by setting state
+            setPlaybackState(prev => ({ ...prev, isPlaying: false }));
+            
+            // Pause active video
+            const activeVideoEl = getActiveVideo();
+            if (activeVideoEl) {
+              activeVideoEl.pause();
+            }
+            
+            // Clear animation frame
+            if (animationFrameRef.current) {
+              clearTimeout(animationFrameRef.current);
+              animationFrameRef.current = undefined;
+            }
+          }
+        }
+      } else {
+        // Continue gap progression
+        setCurrentTime(newTimelineTime);
+        animationFrameRef.current = setTimeout(progressGap, 50) as any;
+      }
+    };
+    
+    // Start gap progression
+    animationFrameRef.current = setTimeout(progressGap, 50) as any;
+  }, [playbackState, setCurrentTime, findClipAtTimeWithGaps, timelineClips, getActiveVideo]);
 
   // Stop timeline playback
   const stopPlayback = useCallback(() => {
@@ -466,9 +675,10 @@ export const useSeamlessTimelinePlayer = (
           activeVideoEl.load();
         }
         
-        // Set position within clip
-        const clipPosition = time - clip.start;
+        // Set position within clip, accounting for in_point offset
+        const clipPosition = time - clip.start + clip.in_point;
         activeVideoEl.currentTime = Math.max(0, clipPosition);
+        console.log(`🎬 [SeamlessPlayer] Seeking: timeline=${time}s, clipStart=${clip.start}s, inPoint=${clip.in_point}s → video=${clipPosition}s`);
         
         // Update state
         setPlaybackState(prev => ({
@@ -483,9 +693,31 @@ export const useSeamlessTimelinePlayer = (
     setCurrentTime(time);
   }, [findClipAtTime, getActiveVideo, setCurrentTime]);
 
-  // Preload URLs when clips change
+  // Reset video elements and preload URLs when clips change
   useEffect(() => {
     if (clips.length > 0) {
+      console.log('🔧 [SeamlessPlayer] Clips changed, resetting video elements and preloading URLs with new clips:', clips.map(c => ({
+        name: c.name,
+        start: c.start,
+        end: c.end,
+        in_point: c.in_point
+      })));
+      
+      // Reset video elements to clear any old video data
+      if (videoARef.current) {
+        videoARef.current.src = '';
+        videoARef.current.load();
+        console.log('🔄 [SeamlessPlayer] Reset video A');
+      }
+      if (videoBRef.current) {
+        videoBRef.current.src = '';
+        videoBRef.current.load();
+        console.log('🔄 [SeamlessPlayer] Reset video B');
+      }
+      
+      // Reset active video to A
+      setActiveVideo('A');
+      
       preloadClipUrls().catch(error => {
         console.error('🚀 [SeamlessPlayer] Error preloading clip URLs:', error);
       });

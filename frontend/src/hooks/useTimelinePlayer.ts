@@ -10,6 +10,7 @@ interface TimelineClip {
   duration: number;
   file_path: string;
   type: string;
+  in_point: number; // Position in source video file (seconds) - OTIO support
   signedUrl?: string;
 }
 
@@ -78,7 +79,7 @@ export const useTimelinePlayer = (videoRef: React.RefObject<HTMLVideoElement>) =
 
     const clipsWithUrls = await Promise.all(urlPromises);
     
-    // Ensure proper type mapping with duration calculation
+    // Ensure proper type mapping with duration calculation and OTIO support
     const mappedClips: TimelineClip[] = clipsWithUrls.map(clip => ({
       id: clip.id,
       name: clip.name,
@@ -87,8 +88,17 @@ export const useTimelinePlayer = (videoRef: React.RefObject<HTMLVideoElement>) =
       duration: clip.end - clip.start,
       file_path: clip.file_path || '',
       type: clip.type,
+      in_point: clip.in_point || 0, // Keep in_point from cut operations, default to 0 only for uncut clips
       signedUrl: 'signedUrl' in clip ? clip.signedUrl : undefined
     }));
+    
+    console.log('🔧 [TimelinePlayer] Mapped clips with in_point values:', mappedClips.map(c => ({
+      name: c.name,
+      start: c.start,
+      end: c.end,
+      in_point: c.in_point,
+      duration: c.duration
+    })));
     
     setTimelineClips(mappedClips);
     
@@ -242,7 +252,9 @@ export const useTimelinePlayer = (videoRef: React.RefObject<HTMLVideoElement>) =
         currentClip
       });
       
-      const clipPosition = currentTime - currentClip.start;
+      // ✅ OTIO FIX: Include in_point offset for non-destructive editing
+      const clipPosition = currentTime - currentClip.start + currentClip.in_point;
+      console.log(`▶️ [TimelinePlayer] OTIO position calc: timeline=${currentTime}s, clipStart=${currentClip.start}s, inPoint=${currentClip.in_point}s → video=${clipPosition}s`);
       const success = await switchToClip(currentClip, clipPosition);
       
       if (!success) {
@@ -322,7 +334,9 @@ export const useTimelinePlayer = (videoRef: React.RefObject<HTMLVideoElement>) =
         if (!playbackState.currentClip || currentClip.id !== playbackState.currentClip.id) {
           // Only switch if not already switching
           if (!switchingRef.current) {
-            const clipPosition = newTimelineTime - currentClip.start;
+            // ✅ OTIO FIX: Include in_point offset for non-destructive editing
+            const clipPosition = newTimelineTime - currentClip.start + currentClip.in_point;
+            console.log(`🎬 [TimelinePlayer] OTIO position calc (switch): timeline=${newTimelineTime}s, clipStart=${currentClip.start}s, inPoint=${currentClip.in_point}s → video=${clipPosition}s`);
             switchToClip(currentClip, clipPosition).then(success => {
               if (success) {
                 console.log('🚨 [DEBUG] setPlaybackState called - switching clip to:', currentClip.id);
@@ -335,7 +349,8 @@ export const useTimelinePlayer = (videoRef: React.RefObject<HTMLVideoElement>) =
           }
         } else {
           // Same clip - apply minimal drift correction to maintain sync
-          const clipPosition = newTimelineTime - currentClip.start;
+          // ✅ OTIO FIX: Include in_point offset for non-destructive editing
+          const clipPosition = newTimelineTime - currentClip.start + currentClip.in_point;
           if (videoRef.current) {
             const video = videoRef.current;
             const videoCurrent = video.currentTime;

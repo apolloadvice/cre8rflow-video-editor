@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.backend.timeline_api import router as timeline_router
 from app.backend.command_api import router as command_router
 from app.backend.upload_api import router as upload_router
+from app.backend.video_cutting_api import router as video_cutting_router
 
 # Try to import GES API with error handling
 try:
@@ -92,8 +93,19 @@ app.include_router(timeline_router, prefix="/api")
 # Include the command API router
 app.include_router(command_router, prefix="/api")
 
+# Include the command API v2 router (with OTIO support)
+try:
+    from app.backend.command_api_v2 import router as command_v2_router
+    app.include_router(command_v2_router, prefix="/api")
+    print("✅ Command API v2 (OTIO support) loaded successfully")
+except Exception as e:
+    print(f"⚠️ Command API v2 disabled due to import error: {e}")
+
 # Include the upload API router
 app.include_router(upload_router, prefix="/api")
+
+# Include the video cutting API router
+app.include_router(video_cutting_router, prefix="/api")
 
 # Include the GES API router if available
 if GES_ROUTER_AVAILABLE:

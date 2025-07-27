@@ -302,6 +302,80 @@ export const useAICommands = () => {
     console.log("🎬 [AI Commands] Current clips before command:", clips);
     console.log("🎬 [AI Commands] Clips count before:", clips.length);
     
+    // OTIO SYSTEM: Handle "cut out" commands using new OTIO timeline API
+    const cutOutMatch = command.match(/cut\s+out\s+(\d{1,2}:\d{2}|\d+)\s*[-–]\s*(\d{1,2}:\d{2}|\d+)/i);
+    if (cutOutMatch) {
+      console.log("🎬 [AI Commands] OTIO: Detected cut out command, using OTIO timeline system");
+      
+              // Use the new OTIO command API v2 for better response handling
+        try {
+          const response = await fetch('/api/command/v2', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              command: command,
+              asset_path: activeVideoAsset?.file_path || 'default',
+              timeline_format: "otio",
+              migration_mode: true
+            })
+          });
+
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.message || 'OTIO command failed');
+        }
+
+        const result = await response.json();
+        console.log("🎬 [AI Commands] OTIO result:", result);
+
+        if (result.status === 'success' || result.status === 'ok') {
+          // ✅ UPDATE FRONTEND TIMELINE: Convert OTIO response to frontend clips
+          if (result.timeline) {
+            console.log("🎬 [AI Commands] Received updated timeline from OTIO", result.timeline);
+            
+            try {
+              // Import timeline adapter to convert OTIO to frontend format
+              const { TimelineAdapter } = await import('@/utils/timelineAdapter');
+              const adapter = new TimelineAdapter(result.timeline);
+              const updatedClips = adapter.getClipsForAPI();
+              
+              console.log("🎬 [AI Commands] Converted OTIO timeline to frontend clips", {
+                originalClipCount: clips.length,
+                newClipCount: updatedClips.length,
+                updatedClips: updatedClips
+              });
+              
+              // Update the frontend store with the new clips
+              setClips(updatedClips);
+              
+              console.log("🎬 [AI Commands] Timeline updated successfully with OTIO response");
+              
+            } catch (conversionError) {
+              console.error("🎬 [AI Commands] Failed to convert OTIO timeline:", conversionError);
+            }
+          }
+          
+          toast({
+            title: "Cut out applied with OTIO",
+            description: result.message || "Successfully processed with OTIO timeline system",
+          });
+          return { success: true, message: result.message };
+        } else {
+          throw new Error(result.message || 'OTIO operation failed');
+        }
+      } catch (error) {
+        console.error("🎬 [AI Commands] OTIO error:", error);
+        toast({
+          title: "Cut out failed", 
+          description: error.message || "Could not apply the cut out command",
+          variant: "destructive",
+        });
+        return { success: false, message: error.message };
+      }
+    }
+    
     // Store initial clip count to detect if optimistic edit was applied
     const initialClipCount = clips.length;
     
@@ -334,8 +408,15 @@ export const useAICommands = () => {
         console.log("🎬 [AI Commands] Using timeline response path:", result.timeline);
         
         try {
+          // Check if timeline has legacy/enhanced format from our backend
+          let timelineData = result.timeline;
+          if (result.timeline.legacy && result.timeline.enhanced) {
+            console.log("🎬 [AI Commands] Detected enhanced timeline format, using legacy format for conversion");
+            timelineData = result.timeline.legacy; // Use legacy format for convertTimelineToClips
+          }
+          
           // Convert backend timeline to frontend clips with error handling
-          const timelineClips = convertTimelineToClips(result.timeline);
+          const timelineClips = convertTimelineToClips(timelineData);
           console.log("🎬 [AI Commands] Converted timeline clips:", timelineClips);
           
           // Validate the converted clips
@@ -488,6 +569,47 @@ export const useAICommands = () => {
     console.log("🎬 [Inference] Starting inference for command:", command);
     const operations: Operation[] = [];
     
+    // Extract cut/cut out commands first - handle both "to" and "-" separators
+    let cutMatch = command.match(/cut\s+out\s+(\d{1,2}:\d{2}|\d+)\s*[-–]\s*(\d{1,2}:\d{2}|\d+)/i);
+    console.log("🎬 [Inference] Cut out hyphen pattern match:", cutMatch);
+    
+    if (!cutMatch) {
+      cutMatch = command.match(/cut\s+out\s+(\d{1,2}:\d{2}|\d+)\s+to\s+(\d{1,2}:\d{2}|\d+)/i);
+      console.log("🎬 [Inference] Cut out 'to' pattern match:", cutMatch);
+    }
+    
+    if (!cutMatch) {
+      // Try other cut patterns
+      cutMatch = command.match(/cut\s+from\s+(\d{1,2}:\d{2}|\d+)\s+to\s+(\d{1,2}:\d{2}|\d+)/i);
+      console.log("🎬 [Inference] Cut from pattern match:", cutMatch);
+    }
+    
+    if (!cutMatch) {
+      // Try remove pattern with hyphen
+      cutMatch = command.match(/remove\s+(\d{1,2}:\d{2}|\d+)\s*[-–]\s*(\d{1,2}:\d{2}|\d+)/i);
+      console.log("🎬 [Inference] Remove hyphen pattern match:", cutMatch);
+    }
+    
+    if (!cutMatch) {
+      // Try remove pattern with "to"
+      cutMatch = command.match(/remove\s+(\d{1,2}:\d{2}|\d+)\s+to\s+(\d{1,2}:\d{2}|\d+)/i);
+      console.log("🎬 [Inference] Remove 'to' pattern match:", cutMatch);
+    }
+    
+    if (cutMatch) {
+      const [, startStr, endStr] = cutMatch;
+      const startSec = parseTimeToSeconds(startStr);
+      const endSec = parseTimeToSeconds(endStr);
+      
+      operations.push({
+        start_sec: startSec,
+        end_sec: endSec,
+        effect: 'cut',
+        params: { create_gap: true, preserve_timing: true }
+      });
+      console.log("🎬 [Inference] Added cut operation:", operations[operations.length - 1]);
+    }
+    
     // Extract text overlay commands - multiple patterns
     let textMatch = command.match(/add text ['"]([^'"]+)['"].*?from\s+(\d+).*?to\s+(\d+)/i);
     console.log("🎬 [Inference] First text pattern match:", textMatch);
@@ -551,6 +673,17 @@ export const useAICommands = () => {
     return operations;
   };
 
+  // Helper function to parse time strings to seconds
+  const parseTimeToSeconds = (timeStr: string): number => {
+    if (timeStr.includes(':')) {
+      const parts = timeStr.split(':');
+      if (parts.length === 2) {
+        return parseInt(parts[0]) * 60 + parseInt(parts[1]);
+      }
+    }
+    return parseInt(timeStr);
+  };
+
   // Apply AI operations to the timeline
   const applyOperationsToTimeline = (operations: Operation[]) => {
     console.log("🎬 [Apply Operations] Input operations:", operations);
@@ -586,6 +719,8 @@ export const useAICommands = () => {
           id: clipId,
           start: startTime,
           end: startTime + clipDuration,
+          duration: clipDuration,
+          in_point: 0,
           track: track,
           type: "text",
           text: op.params?.text || "Text",
@@ -596,11 +731,17 @@ export const useAICommands = () => {
           id: clipId,
           start: startTime,
           end: startTime + clipDuration,
+          duration: clipDuration,
+          in_point: 0,
           track: track,
           type: "overlay",  // Use 'overlay' as the clip type for track assignment
           name: `${op.params?.asset || "Asset"}`,  // Simplified name for overlays
           asset: op.params?.asset
         };
+      } else if (op.effect === 'cut') {
+        // For cut operations, we don't create new clips, we modify existing ones
+        console.log("🎬 [Apply Operations] Cut operation detected - will be handled by backend");
+        return null; // Skip creating clips for cut operations
       }
       
       // Default for other effects
@@ -608,24 +749,28 @@ export const useAICommands = () => {
         id: clipId,
         start: startTime,
         end: startTime + clipDuration,
+        duration: clipDuration,
+        in_point: 0,
         track: track,
         type: op.effect,
         name: `${op.effect.charAt(0).toUpperCase() + op.effect.slice(1)} Effect`
       };
     });
     
-    console.log("🎬 [Apply Operations] New clips created:", newClips);
-    console.log("🎬 [Apply Operations] New clips count:", newClips.length);
+    // Filter out null values (from cut operations)
+    const validNewClips = newClips.filter(clip => clip !== null);
+    console.log("🎬 [Apply Operations] New clips created:", validNewClips);
+    console.log("🎬 [Apply Operations] New clips count:", validNewClips.length);
     
     // Preserve existing clips by merging them with new clips
-    const updatedClips = [...currentClips, ...newClips];
+    const updatedClips = [...currentClips, ...validNewClips];
     console.log("🎬 [Apply Operations] Updated clips (merged):", updatedClips);
     console.log("🎬 [Apply Operations] Final clips count:", updatedClips.length);
     
     setClips(updatedClips);
     
-    if (newClips.length > 0) {
-      setSelectedClipId(newClips[0].id);
+    if (validNewClips.length > 0) {
+      setSelectedClipId(validNewClips[0].id);
       
       // Verify clips are still there after a small delay
       setTimeout(() => {

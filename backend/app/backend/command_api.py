@@ -3,7 +3,10 @@ from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from app.command_parser import CommandParser
 from app.command_executor import CommandExecutor
-from app.timeline import Timeline, VideoClip, Effect
+# New OTIO-based timeline system (default)
+from app.timeline_v2 import Timeline, load_timeline_from_dict
+# Legacy timeline for backward compatibility
+from app.timeline import Timeline as LegacyTimeline, VideoClip, Effect
 from .schemas import CommandRequest, CommandResponse
 import logging
 from supabase import create_client, Client
@@ -11,6 +14,9 @@ import os
 import json
 from app.llm_parser import parse_command_with_llm
 from datetime import datetime
+import re
+from app.command_types import EditOperation
+from app.utils import parse_natural_time_expression
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -152,14 +158,32 @@ def migrate_timeline_schema(timeline_json: dict) -> dict:
             for clip in track_clips:
                 # Convert frame-based to seconds-based for schema
                 if isinstance(clip, dict) and clip.get("_type") == "VideoClip":
+                    # Check if values are likely in frames (large numbers) or seconds (small numbers)
+                    start_val = clip.get("start", 0)
+                    end_val = clip.get("end", 0)
+                    frame_rate = timeline_json.get("frame_rate", 30.0)
+                    
+                    # If end_val > 100, assume it's in frames and convert to seconds
+                    # If end_val <= 100, assume it's already in seconds
+                    if end_val > 100:
+                        timeline_start = start_val / frame_rate
+                        timeline_end = end_val / frame_rate
+                        duration = (end_val - start_val) / frame_rate
+                        in_point = clip.get("in_point", 0) / frame_rate
+                    else:
+                        timeline_start = start_val
+                        timeline_end = end_val
+                        duration = end_val - start_val
+                        in_point = clip.get("in_point", 0)
+                    
                     migrated_clip = {
                         "id": clip.get("clip_id", clip.get("id")),
                         "name": clip.get("name", ""),
                         "file_path": clip.get("file_path", ""),
-                        "timeline_start": clip.get("start", 0) / timeline_json.get("frame_rate", 30.0),
-                        "timeline_end": clip.get("end", 0) / timeline_json.get("frame_rate", 30.0),
-                        "duration": (clip.get("end", 0) - clip.get("start", 0)) / timeline_json.get("frame_rate", 30.0),
-                        "in_point": clip.get("in_point", 0) / timeline_json.get("frame_rate", 30.0),
+                        "timeline_start": timeline_start,
+                        "timeline_end": timeline_end,
+                        "duration": duration,
+                        "in_point": in_point,
                         "track": clip.get("track_index", 0),
                         "type": clip.get("track_type", "video"),
                         "effects": clip.get("effects", [])
@@ -313,60 +337,73 @@ def load_timeline_from_db_robust(asset_path: str, validate_assets: bool = True,
             if not validation_result["valid"]:
                 loading_stats["validation_errors"].extend(validation_result["errors"])
         
-        # Step 4: Create timeline with validated metadata
-        timeline_data = timeline_json.get("timeline", {})
-        frame_rate = timeline_data.get("frame_rate", 30.0)
-        
-        # Validate frame rate
-        if not (1.0 <= frame_rate <= 120.0):
-            logging.warning(f"Invalid frame rate {frame_rate}, using default 30.0")
-            frame_rate = 30.0
-            loading_stats["validation_errors"].append(f"Invalid frame rate corrected to 30.0")
-        
-        timeline = Timeline(frame_rate=frame_rate)
-        
-        # Step 5: Load clips with robust error handling
-        clips_data = timeline_json.get("clips", [])
-        loading_stats["total_clips"] = len(clips_data)
-        
-        for i, clip_data in enumerate(clips_data):
-            try:
-                # Validate individual clip data
-                clip_validation = validate_clip_data(clip_data, timeline)
-                if not clip_validation["valid"]:
-                    loading_stats["validation_errors"].extend(clip_validation["errors"])
-                    if not allow_partial_load:
-                        raise ValueError(f"Clip {i} validation failed: {clip_validation['errors']}")
-                
-                # Check asset availability if requested
-                if validate_assets and clip_data.get("file_path"):
-                    asset_exists = check_asset_availability(clip_data["file_path"])
-                    if not asset_exists:
-                        loading_stats["missing_assets"] += 1
-                        loading_stats["validation_errors"].append(f"Missing asset: {clip_data['file_path']}")
+        # Step 4: Use new OTIO timeline system with automatic format detection and migration
+        try:
+            # Try to load using the new system that handles both OTIO and legacy formats
+            timeline = load_timeline_from_dict(timeline_json)
+            loading_stats["loaded_clips"] = len(timeline.get_all_clips())
+            loading_stats["total_clips"] = loading_stats["loaded_clips"]
+            
+            logging.info(f"Successfully loaded timeline using OTIO system with {loading_stats['loaded_clips']} clips")
+            
+        except Exception as otio_load_error:
+            logging.warning(f"OTIO timeline loading failed: {otio_load_error}, creating new OTIO timeline")
+            
+            # Fallback to legacy loading approach
+            timeline_data = timeline_json.get("timeline", {})
+            frame_rate = timeline_data.get("frame_rate", 30.0)
+            
+            # Validate frame rate
+            if not (1.0 <= frame_rate <= 120.0):
+                logging.warning(f"Invalid frame rate {frame_rate}, using default 30.0")
+                frame_rate = 30.0
+                loading_stats["validation_errors"].append(f"Invalid frame rate corrected to 30.0")
+            
+            # Use new OTIO-based timeline system by default
+            timeline = Timeline.create_default(fps=frame_rate)
+            
+            # Step 5: Load clips with robust error handling (legacy fallback)
+            clips_data = timeline_json.get("clips", [])
+            loading_stats["total_clips"] = len(clips_data)
+            
+            for i, clip_data in enumerate(clips_data):
+                try:
+                    # Validate individual clip data
+                    clip_validation = validate_clip_data(clip_data, timeline)
+                    if not clip_validation["valid"]:
+                        loading_stats["validation_errors"].extend(clip_validation["errors"])
                         if not allow_partial_load:
-                            raise FileNotFoundError(f"Asset not found: {clip_data['file_path']}")
-                
-                # Create and add clip
-                video_clip = create_video_clip_from_json_robust(clip_data, timeline)
-                track_index = clip_data.get("track", 0)
-                
-                # Validate track index
-                if track_index < 0:
-                    loading_stats["validation_errors"].append(f"Invalid track index {track_index}, using 0")
-                    track_index = 0
-                
-                timeline.add_clip(video_clip, track_index=track_index)
-                loading_stats["loaded_clips"] += 1
-                
-            except Exception as clip_error:
-                loading_stats["failed_clips"] += 1
-                error_msg = f"Failed to load clip {i}: {str(clip_error)}"
-                loading_stats["validation_errors"].append(error_msg)
-                logging.warning(error_msg)
-                
-                if not allow_partial_load:
-                    raise clip_error
+                            raise ValueError(f"Clip {i} validation failed: {clip_validation['errors']}")
+                    
+                    # Check asset availability if requested
+                    if validate_assets and clip_data.get("file_path"):
+                        asset_exists = check_asset_availability(clip_data["file_path"])
+                        if not asset_exists:
+                            loading_stats["missing_assets"] += 1
+                            loading_stats["validation_errors"].append(f"Missing asset: {clip_data['file_path']}")
+                            if not allow_partial_load:
+                                raise FileNotFoundError(f"Asset not found: {clip_data['file_path']}")
+                    
+                    # Create and add clip (legacy method for fallback)
+                    video_clip = create_video_clip_from_json_robust(clip_data, timeline)
+                    track_index = clip_data.get("track", 0)
+                    
+                    # Validate track index
+                    if track_index < 0:
+                        loading_stats["validation_errors"].append(f"Invalid track index {track_index}, using 0")
+                        track_index = 0
+                    
+                    timeline.add_clip(video_clip, track_index=track_index)
+                    loading_stats["loaded_clips"] += 1
+                    
+                except Exception as clip_error:
+                    loading_stats["failed_clips"] += 1
+                    error_msg = f"Failed to load clip {i}: {str(clip_error)}"
+                    loading_stats["validation_errors"].append(error_msg)
+                    logging.warning(error_msg)
+                    
+                    if not allow_partial_load:
+                        raise clip_error
         
         # Step 6: Post-load validation and optimization
         timeline_validation = validate_timeline_integrity(timeline)
@@ -414,24 +451,25 @@ def load_timeline_from_db_robust(asset_path: str, validate_assets: bool = True,
 
 def create_default_timeline(asset_path: str) -> Timeline:
     """
-    Create a default timeline for new assets.
+    Create a default timeline for new assets using OTIO system.
     Auto-creates timeline with primary asset if it exists.
     
     Args:
         asset_path (str): Path to the primary asset
         
     Returns:
-        Timeline: New timeline instance
+        Timeline: New OTIO-based timeline instance
     """
-    timeline = Timeline(frame_rate=30.0)
+    # Create new OTIO-based timeline
+    timeline = Timeline.create_default(fps=30.0)
     
     # Try to get asset duration and create initial clip
     duration = get_asset_duration(asset_path)
     if duration is not None:
-        logging.info(f"Creating default timeline with primary asset: {asset_path} (duration: {duration}s)")
+        logging.info(f"Creating default OTIO timeline with primary asset: {asset_path} (duration: {duration}s)")
         timeline.load_video(asset_path, duration_seconds=duration)
     else:
-        logging.info(f"Creating empty timeline for asset: {asset_path}")
+        logging.info(f"Creating empty OTIO timeline for asset: {asset_path}")
     
     return timeline
 
@@ -451,7 +489,19 @@ def get_asset_duration(asset_path: str) -> float:
     return None
 
 def save_timeline_to_db(asset_path: str, timeline_dict: dict):
+    """
+    Save timeline to database with support for both OTIO and legacy formats.
+    """
     supabase = get_supabase_client()
+    
+    # Check if this is an OTIO timeline format
+    is_otio = timeline_dict.get("_type") == "OTIOTimeline"
+    
+    if is_otio:
+        logging.info(f"[save_timeline_to_db] Saving OTIO timeline format for {asset_path}")
+    else:
+        logging.info(f"[save_timeline_to_db] Saving legacy timeline format for {asset_path}")
+    
     # Try to fetch the existing row's id
     result = supabase.table(SUPABASE_TABLE).select("id").eq("asset_path", asset_path).execute()
     upsert_payload = {
@@ -462,13 +512,66 @@ def save_timeline_to_db(asset_path: str, timeline_dict: dict):
     if result.data and len(result.data) > 0 and "id" in result.data[0]:
         upsert_payload["id"] = result.data[0]["id"]
     try:
-        logging.info(f"[save_timeline_to_db] Upserting timeline for asset_path={asset_path}. Payload keys: {list(upsert_payload.keys())}")
+        logging.info(f"[save_timeline_to_db] Upserting timeline for asset_path={asset_path}. Format: {'OTIO' if is_otio else 'Legacy'}")
         logging.debug(f"[save_timeline_to_db] Timeline JSON: {json.dumps(timeline_dict)[:500]}... (truncated)")
         upsert_result = supabase.table(SUPABASE_TABLE).upsert(upsert_payload).execute()
         logging.info(f"[save_timeline_to_db] Upsert result: {upsert_result}")
+        return True
     except Exception as e:
         logging.error(f"[save_timeline_to_db] Supabase upsert error: {e}")
         raise
+
+
+def save_timeline_object_to_db(asset_path: str, timeline: Timeline) -> bool:
+    """
+    Save a Timeline object to database, handling OTIO format conversion.
+    """
+    try:
+        # Convert timeline to dictionary format for storage
+        if hasattr(timeline, 'to_dict'):
+            # OTIO timeline - save in OTIO format
+            timeline_dict = timeline.to_dict()
+        else:
+            # Legacy timeline - convert to legacy format
+            timeline_dict = timeline.to_legacy_format() if hasattr(timeline, 'to_legacy_format') else {}
+        
+        save_timeline_to_db(asset_path, timeline_dict)
+        return True
+    except Exception as e:
+        logging.error(f"Failed to save timeline object: {e}")
+        return False
+
+def _parse_time_to_seconds(token: str, duration_hint: Optional[float] = None) -> Optional[float]:
+    """
+    Accepts: 'hh:mm:ss', 'mm:ss', 'ss', '12.5', '12s', or natural phrases handled
+    by parse_natural_time_expression. Returns seconds as float, or None.
+    """
+    if token is None:
+        return None
+    t = token.strip().lower()
+    # numeric with trailing 's'
+    if t.endswith("s"):
+        try:
+            return float(t[:-1])
+        except Exception:
+            pass
+    # plain float / int
+    try:
+        return float(t)
+    except Exception:
+        pass
+    # hh:mm:ss or mm:ss
+    if ":" in t:
+        parts = [p for p in t.split(":") if p != ""]
+        try:
+            if len(parts) == 2:
+                return int(parts[0]) * 60 + float(parts[1])
+            if len(parts) == 3:
+                return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+        except Exception:
+            pass
+    # natural language like "the last 5 seconds", "halfway"
+    return parse_natural_time_expression(t, duration_hint)
 
 def save_timeline_to_db_enhanced(asset_path: str, timeline: Timeline):
     """
@@ -526,8 +629,85 @@ async def apply_command(payload: CommandRequest):
             "logs": [],
         }
     
-    # 2. Parse command using LLM parser directly
+    # 2a. Fast path for explicit range command: "cut out 00:05-00:10"
+    #     Now uses OTIO timeline system for non-destructive operations
     duration = get_asset_duration(payload.asset_path) or 60.0
+    cutout_match = re.search(
+        r"\bcut\s+out\s+([0-9:.a-zA-Z]+)\s*[-–]\s*([0-9:.a-zA-Z]+)",
+        payload.command,
+        re.IGNORECASE,
+    )
+    if cutout_match:
+        logging.info(f"[apply_command][fast-path-otio] Cut out pattern matched: {payload.command}")
+        start_token = cutout_match.group(1)
+        end_token = cutout_match.group(2)
+        logging.info(f"[apply_command][fast-path-otio] Parsing times: {start_token} -> {end_token}")
+        start_sec = _parse_time_to_seconds(start_token, duration)
+        end_sec = _parse_time_to_seconds(end_token, duration)
+        logging.info(f"[apply_command][fast-path-otio] Parsed times: {start_sec}s -> {end_sec}s")
+
+        if start_sec is None or end_sec is None:
+            return {
+                "status": "error",
+                "applied": False,
+                "timeline": timeline.to_dict(),
+                "message": f"Could not parse time range '{start_token}-{end_token}'.",
+                "logs": [],
+            }
+        if end_sec <= start_sec:
+            return {
+                "status": "error",
+                "applied": False,
+                "timeline": timeline.to_dict(),
+                "message": "End time must be greater than start time for 'cut out'.",
+                "logs": [],
+            }
+
+        # Use OTIO timeline's built-in cut_out_range method (non-destructive)
+        try:
+            success = timeline.cut_out_range(
+                start_seconds=start_sec,
+                end_seconds=end_sec,
+                track_type="video",
+                track_index=0,
+                mode='ripple'  # Close gap after cutting
+            )
+            
+            if success:
+                # Save updated timeline
+                save_result = save_timeline_object_to_db(payload.asset_path, timeline)
+                
+                # Create response with OTIO timeline data
+                timeline_response = timeline.to_dict()
+                
+                removed_duration = end_sec - start_sec
+                return {
+                    "status": "success",
+                    "applied": True,
+                    "timeline": timeline_response,
+                    "message": f"Successfully cut out {start_sec:.2f}s-{end_sec:.2f}s (removed {removed_duration:.2f}s) using OTIO system.",
+                    "logs": [f"OTIO cut out: {start_sec:.2f}s to {end_sec:.2f}s"],
+                }
+            else:
+                return {
+                    "status": "error",
+                    "applied": False,
+                    "timeline": timeline.to_dict(),
+                    "message": f"Failed to cut out range {start_sec:.2f}s-{end_sec:.2f}s. Check if clips exist in the specified range.",
+                    "logs": [],
+                }
+                
+        except Exception as e:
+            logging.error(f"[apply_command][fast-path-otio] Cut out operation failed: {e}")
+            return {
+                "status": "error",
+                "applied": False,
+                "timeline": timeline.to_dict(),
+                "message": f"Cut out operation failed: {str(e)}",
+                "logs": [f"Error: {str(e)}"],
+            }
+
+    # 2. Parse command using LLM parser (fallback for non-fast-path commands)
     parsed_llm, error = parse_command_with_llm(payload.command, duration=duration)
     
     if error:
@@ -550,93 +730,112 @@ async def apply_command(payload: CommandRequest):
             "logs": [],
         }
     
-    # 3. Convert LLM output to EditOperation(s)
-    operations = []
-    
-    # Handle both single operations and arrays
-    llm_operations = parsed_llm if isinstance(parsed_llm, list) else [parsed_llm]
-    
-    for llm_op in llm_operations:
-        try:
-            operation = convert_llm_to_operation(llm_op)
-            operations.append(operation)
-        except Exception as e:
-            logging.error(f"[apply_command] Error converting LLM operation {llm_op}: {e}")
-            return {
-                "status": "error",
-                "applied": False, 
-                "timeline": timeline.to_dict(),
-                "message": f"Failed to process operation: {e}",
-                "logs": [],
-            }
-    
-    # 4. Execute operations
-    executor = CommandExecutor(timeline)
-    all_results = []
-    
-    for operation in operations:
-        logging.debug(f"[apply_command] Executing operation: {operation.type}, target: {operation.target}, parameters: {operation.parameters}")
-        exec_result = executor.execute(operation, command_text=payload.command)
-        all_results.append(exec_result)
-        logging.info(f"[apply_command] Execution result: success={exec_result.success}, message={exec_result.message}")
+    # 3. Handle commands using OTIO timeline system
+    try:
+        success = False
+        message = "Command processed"
         
-        if not exec_result.success:
-            # If any operation fails, return error
-            error_logs = []
-            if hasattr(exec_result, 'data') and exec_result.data and isinstance(exec_result.data, dict):
-                error_logs = exec_result.data.get('logs', [])
+        # Handle both single operations and arrays
+        llm_operations = parsed_llm if isinstance(parsed_llm, list) else [parsed_llm]
+        
+        for llm_op in llm_operations:
+            operation_type = llm_op.get("type", "").upper()
             
+            if operation_type == "ADD_TEXT":
+                # Handle text addition using OTIO system
+                text = llm_op.get("text", "Default Text")
+                start_sec = llm_op.get("start", 0.0)
+                duration_sec = llm_op.get("duration", 5.0)
+                
+                timeline.add_text_clip(
+                    text=text,
+                    start_seconds=start_sec,
+                    duration_seconds=duration_sec,
+                    track_index=0
+                )
+                success = True
+                message = f"Added text '{text}' at {start_sec:.2f}s for {duration_sec:.2f}s"
+                
+            elif operation_type in ["CUT", "CUT_OUT", "CUT_OUT_WORKFLOW"]:
+                # Handle cut operations using OTIO system
+                start_sec = llm_op.get("start", 0.0)
+                end_sec = llm_op.get("end", 5.0)
+                
+                success = timeline.cut_out_range(
+                    start_seconds=start_sec,
+                    end_seconds=end_sec,
+                    track_type="video",
+                    track_index=0,
+                    mode='ripple'
+                )
+                
+                if success:
+                    removed_duration = end_sec - start_sec
+                    message = f"Cut out {start_sec:.2f}s-{end_sec:.2f}s (removed {removed_duration:.2f}s)"
+                else:
+                    message = f"Failed to cut out range {start_sec:.2f}s-{end_sec:.2f}s"
+                    
+            else:
+                # For other operation types, fall back to legacy executor for now
+                logging.info(f"[apply_command] Falling back to legacy executor for operation: {operation_type}")
+                try:
+                    operation = convert_llm_to_operation(llm_op)
+                    executor = CommandExecutor(timeline)
+                    exec_result = executor.execute(operation, command_text=payload.command)
+                    success = exec_result.success
+                    message = exec_result.message
+                except Exception as e:
+                    success = False
+                    message = f"Legacy executor failed: {str(e)}"
+        
+        if not success:
             return {
                 "status": "error",
                 "applied": False,
                 "timeline": timeline.to_dict(), 
-                "message": f"Operation failed: {exec_result.message}",
-                "logs": error_logs,
+                "message": message,
+                "logs": [],
             }
     
-    # 5. Save updated timeline to DB using enhanced saver
+    except Exception as e:
+        logging.error(f"[apply_command] Command execution failed: {e}")
+        return {
+            "status": "error",
+            "applied": False,
+            "timeline": timeline.to_dict(),
+            "message": f"Command execution failed: {str(e)}",
+            "logs": [f"Error: {str(e)}"],
+        }
+    
+    # 4. Save updated timeline to DB using OTIO-compatible saver
     try:
-        save_timeline_to_db_enhanced(payload.asset_path, timeline)
+        save_timeline_object_to_db(payload.asset_path, timeline)
+        logging.info(f"[apply_command] OTIO timeline saved successfully")
     except Exception as e:
         logging.error(f"[apply_command] Error saving timeline to DB: {e}")
         raise
     
-    # 6. Return updated timeline
-    all_messages = [result.message for result in all_results if result.message]
-    all_logs = []
-    for result in all_results:
-        # Extract logs from result.data since ExecutionResult doesn't have logs attribute
-        if hasattr(result, 'data') and result.data and isinstance(result.data, dict):
-            logs_from_data = result.data.get('logs', [])
-            if logs_from_data:
-                all_logs.extend(logs_from_data)
-    
-    # 6. Create enhanced response with GES-compatible timeline data
+    # 5. Return updated timeline with OTIO format
     try:
-        all_clips = timeline.get_all_clips("video")
-        for track_type in ["audio", "subtitle", "effect"]:
-            try:
-                track_clips = timeline.get_all_clips(track_type)
-                all_clips.extend(track_clips)
-            except Exception:
-                pass
-        
-        # Return both legacy format and enhanced schema for compatibility
-        timeline_response = {
-            "legacy": timeline.to_dict(),
-            "enhanced": create_timeline_json_schema(all_clips, timeline)
-        }
-    except Exception as e:
-        logging.warning(f"Failed to create enhanced timeline response: {e}")
         timeline_response = timeline.to_dict()
-    
-    return {
-        "status": "ok",
-        "applied": True,
-        "timeline": timeline_response,
-        "message": "; ".join(all_messages) if all_messages else "Commands applied successfully.",
-        "logs": all_logs,
-    }
+        
+        return {
+            "status": "success",
+            "applied": True,
+            "timeline": timeline_response,
+            "message": message,
+            "logs": [],
+        }
+        
+    except Exception as e:
+        logging.error(f"[apply_command] Error creating timeline response: {e}")
+        return {
+            "status": "error",
+            "applied": True,  # Command was applied but response creation failed
+            "timeline": {},
+            "message": f"Command applied but response creation failed: {str(e)}",
+            "logs": [],
+        }
 
 def convert_llm_to_operation(llm_op: dict) -> 'EditOperation':
     """
@@ -662,13 +861,32 @@ def convert_llm_to_operation(llm_op: dict) -> 'EditOperation':
             operation_target = "all_clips"
         else:
             # Single clip cut operation
-            operation_type = "CUT"
+            start_time = llm_op.get("start")
+            end_time = llm_op.get("end")
+            create_gap = llm_op.get("create_gap", True)  # Default to gap-creating cuts
+            preserve_timing = llm_op.get("preserve_timing", True)
+            
+            # Detect "cut out" workflow: has both start and end times and create_gap=True
+            if start_time is not None and end_time is not None and create_gap and preserve_timing:
+                operation_type = "CUT_OUT_WORKFLOW"
+            elif create_gap:
+                operation_type = "CUT_WITH_GAP"
+            else:
+                operation_type = "CUT"
+                
             parameters = {
-                "start": llm_op.get("start"),
-                "end": llm_op.get("end"),
+                "start": start_time,
+                "end": end_time,
                 "track_type": "video",
+                "create_gap": create_gap,
+                "preserve_timing": preserve_timing,
             }
-            operation_target = llm_op.get("clip_name", "main_clip")
+            # For single clip operations without a specific clip name, use target selector
+            if target == "single_clip":
+                operation_target = "first clip"  # This will be resolved by the executor
+                parameters["reference_type"] = "positional"
+            else:
+                operation_target = llm_op.get("clip_name", "first clip")
     
     elif action == "add_text":
         if target == "each_clip":
