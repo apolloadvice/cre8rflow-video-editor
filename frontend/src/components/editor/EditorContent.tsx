@@ -11,9 +11,9 @@ import LayerManager from "@/components/editor/LayerManager";
 import { useEditorStore, useLayoutSetter, useLayout, useCurrentGESProjectId, LayerType } from "@/store/editorStore";
 import { useVideoHandler } from "@/hooks/useVideoHandler";
 import { useAICommands } from "@/hooks/useAICommands";
-import { saveTimeline } from "@/api/apiClient";
+// REMOVED: Legacy saveTimeline import - now using v2 auto-save in useVideoHandler
 import { useToast } from "@/hooks/use-toast";
-import { debounce } from "lodash";
+// REMOVED: debounce import - no longer needed after removing legacy save
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -70,17 +70,7 @@ const EditorContent = ({ isAssetPanelVisible = true, isEffectsPanelVisible = fal
   const { handleChatCommand } = useAICommands();
   const { toast } = useToast();
 
-  // Debounced timeline save
-  const debouncedSaveTimeline = useRef(
-    debounce(async (assetPath: string, timeline: any) => {
-      try {
-        await saveTimeline(assetPath, timeline);
-        toast({ title: "Timeline saved", description: "Your changes have been saved.", variant: "default" });
-      } catch (err: any) {
-        toast({ title: "Save failed", description: err.message || "Failed to save timeline.", variant: "destructive" });
-      }
-    }, 800)
-  ).current;
+  // REMOVED: Legacy debounced save - now using v2 auto-save in useVideoHandler
 
   // Animation frame for syncing video time with store - DISABLED
   // This was causing dual cursor issues when using interval timeline
@@ -140,10 +130,7 @@ const EditorContent = ({ isAssetPanelVisible = true, isEffectsPanelVisible = fal
   // Save timeline after clip update
   const handleClipUpdate = (clipId: string, updates: { start?: number; end?: number }) => {
     updateClip(clipId, updates);
-    if (activeVideoAsset?.file_path) {
-      const timelineObj = buildTimelineObject(clips.map(c => c.id === clipId ? { ...c, ...updates } : c));
-      debouncedSaveTimeline(activeVideoAsset.file_path, timelineObj);
-    }
+    // REMOVED: Legacy timeline save - clip updates now auto-saved via drag-and-drop handlers
   };
 
   // Handle clip movement within timeline (for reordering)
@@ -164,33 +151,20 @@ const EditorContent = ({ isAssetPanelVisible = true, isEffectsPanelVisible = fal
           ? { ...c, track: newTrack, start: newStartTime, end: newEndTime }
           : c
       );
-      const timelineObj = buildTimelineObject(updatedClips);
-      debouncedSaveTimeline(activeVideoAsset.file_path, timelineObj);
+      // REMOVED: Legacy timeline save - clip moves now auto-saved via drag-and-drop handlers
     }
   };
 
   // Patch handleVideoAssetDrop to save timeline after drop
   const handleVideoAssetDrop = (videoAsset: any, track: number, dropTime: number) => {
     origHandleVideoAssetDrop(videoAsset, track, dropTime);
-    // Save after drop (new clip added)
-    setTimeout(() => {
-      if (activeVideoAsset?.file_path) {
-        const timelineObj = buildTimelineObject(useEditorStore.getState().clips);
-        debouncedSaveTimeline(activeVideoAsset.file_path, timelineObj);
-      }
-    }, 0);
+    // REMOVED: Legacy save after drop - useVideoHandler now has built-in auto-save
   };
 
   // Patch handleMultipleVideoAssetDrop to save timeline after drop
   const handleMultipleVideoAssetDrop = (videoAssets: any[], track: number, dropTime: number) => {
     origHandleMultipleVideoAssetDrop(videoAssets, track, dropTime);
-    // Save after drop (new clips added)
-    setTimeout(() => {
-      if (activeVideoAsset?.file_path) {
-        const timelineObj = buildTimelineObject(useEditorStore.getState().clips);
-        debouncedSaveTimeline(activeVideoAsset.file_path, timelineObj);
-      }
-    }, 0);
+    // REMOVED: Legacy save after drop - useVideoHandler now has built-in auto-save
   };
 
   // Handlers for layout changes

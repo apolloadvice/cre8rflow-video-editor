@@ -12,7 +12,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.backend.timeline_api import router as timeline_router
 from app.backend.command_api import router as command_router
 from app.backend.upload_api import router as upload_router
-from app.backend.video_cutting_api import router as video_cutting_router
+
+# Try to import Video Cutting API with error handling
+try:
+    from app.backend.video_cutting_api import router as video_cutting_router
+    VIDEO_CUTTING_ROUTER_AVAILABLE = True
+    print("✅ Video cutting router loaded successfully")
+except Exception as e:
+    VIDEO_CUTTING_ROUTER_AVAILABLE = False
+    print(f"⚠️ Video cutting router disabled due to import error: {e}")
 
 # Try to import GES API with error handling
 try:
@@ -104,8 +112,12 @@ except Exception as e:
 # Include the upload API router
 app.include_router(upload_router, prefix="/api")
 
-# Include the video cutting API router
-app.include_router(video_cutting_router, prefix="/api")
+# Include the video cutting API router if available
+if VIDEO_CUTTING_ROUTER_AVAILABLE:
+    app.include_router(video_cutting_router, prefix="/api")
+    print("✅ Video cutting endpoints registered")
+else:
+    print("⚠️ Video cutting endpoints skipped")
 
 # Include the GES API router if available
 if GES_ROUTER_AVAILABLE:

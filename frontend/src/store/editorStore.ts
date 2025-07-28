@@ -134,6 +134,28 @@ export const getTrackTypeByIndex = (index: number): TrackType => {
   return types[index] || TrackType.OTHER;
 };
 
+/**
+ * Required fields for seamless timeline playback:
+ * - type: must be 'video' for video playback (other types are ignored by the seamless player)
+ * - file_path: non-empty string; path inside Supabase 'assets' bucket used to create signed URLs
+ * - start / end: timeline positions in seconds
+ * - in_point: source-media offset in seconds (where this clip segment begins inside the file)
+ * - track: typically 0 for main video track (no overlapping video clips expected)
+ *
+ * Example sequence (A 0–10, A 20–30, B 0–20, C 0–10):
+ * const clips: Clip[] = [
+ *   { id: 'A1', name: 'Video A (0–10)',  type: 'video', track: 0,
+ *     file_path: 'videos/A.mp4', start: 0,  end: 10, in_point: 0 },
+ *   { id: 'A2', name: 'Video A (20–30)', type: 'video', track: 0,
+ *     file_path: 'videos/A.mp4', start: 10, end: 20, in_point: 20 },
+ *   { id: 'B1', name: 'Video B (full)',  type: 'video', track: 0,
+ *     file_path: 'videos/B.mp4', start: 20, end: 40, in_point: 0 },
+ *   { id: 'C1', name: 'Video C (full)',  type: 'video', track: 0,
+ *     file_path: 'videos/C.mp4', start: 40, end: 50, in_point: 0 },
+ * ];
+ *
+ * Adjacent start/end values remove gaps; the player preloads the next clip and switches at boundaries.
+ */
 export interface Clip {
   id: string;
   name: string;
@@ -184,20 +206,139 @@ export const updateClipDuration = (clip: Clip): Clip => {
 };
 
 export const validateClip = (clip: Clip): boolean => {
-  return (
-    clip.id && 
-    clip.name && 
-    clip.start >= 0 && 
-    clip.end > clip.start && 
+  const baseOk =
+    !!clip.id &&
+    !!clip.name &&
+    typeof clip.start === 'number' &&
+    typeof clip.end === 'number' &&
+    clip.end > clip.start &&
+    typeof clip.in_point === 'number' &&
+    clip.in_point >= 0 &&
+    typeof clip.track === 'number' &&
     clip.track >= 0 &&
-    clip.in_point >= 0
-  );
+    !!clip.type;
+
+  if (!baseOk) return false;
+
+  if (clip.type === 'video') {
+    if (!clip.file_path || clip.file_path.trim() === '') return false;
+  }
+
+  return true;
+};
+
+/**
+ * Helper function that describes the required Clip[] structure for seamless player integration.
+ * Returns a detailed description of what the seamless timeline player expects.
+ */
+export const describeRequiredClipShapeForSeamlessPlayer = (): string => {
+  return `
+Required Clip[] structure for seamless player:
+
+ESSENTIAL FIELDS:
+• type: 'video' (only video clips are played; other types ignored)
+• file_path: non-empty string (path in Supabase 'assets' bucket for signed URL creation)
+• start: timeline position start in seconds (number)
+• end: timeline position end in seconds (number)  
+• in_point: source media offset in seconds (where clip segment begins in original file)
+• track: typically 0 for main video track (number)
+
+SEAMLESS PLAYBACK REQUIREMENTS:
+• Adjacent clips should have touching start/end times (no gaps)
+• Example: clip1.end === clip2.start for seamless transitions
+• Player preloads next clip and switches exactly at boundary times
+• Overlapping video clips on same track are not supported
+
+EXAMPLE VALID SEQUENCE:
+[
+  { type: 'video', file_path: 'videos/A.mp4', start: 0,  end: 10, in_point: 0,  track: 0 },
+  { type: 'video', file_path: 'videos/A.mp4', start: 10, end: 20, in_point: 20, track: 0 },
+  { type: 'video', file_path: 'videos/B.mp4', start: 20, end: 40, in_point: 0,  track: 0 }
+]
+`.trim();
+};
+
+/**
+ * Development-only validator that checks for timeline gaps/overlaps and missing required fields.
+ * Only runs in development mode (NODE_ENV !== 'production').
+ * Logs warnings to console for timeline structure issues.
+ */
+export const assertSeamlessClips = (clips: Clip[]): void => {
+  // Only run in development
+  if (typeof process !== 'undefined' && process.env.NODE_ENV === 'production') {
+    return;
+  }
+
+  const videoClips = clips.filter(c => c.type === 'video').sort((a, b) => a.start - b.start);
+  
+  if (videoClips.length === 0) {
+    console.warn('🎬 [assertSeamlessClips] No video clips found for seamless playback');
+    return;
+  }
+
+  // Check for missing required fields
+  const invalidClips = videoClips.filter(clip => !validateClip(clip));
+  if (invalidClips.length > 0) {
+    console.warn('🎬 [assertSeamlessClips] Invalid clips detected:', invalidClips.map(c => ({
+      id: c.id,
+      name: c.name,
+      missing_file_path: !c.file_path || c.file_path.trim() === '',
+      invalid_timing: c.start >= c.end,
+      negative_in_point: c.in_point < 0
+    })));
+  }
+
+  // Check for gaps between clips
+  const gaps: Array<{from: number, to: number, duration: number}> = [];
+  for (let i = 0; i < videoClips.length - 1; i++) {
+    const current = videoClips[i];
+    const next = videoClips[i + 1];
+    
+    if (current.end < next.start) {
+      gaps.push({
+        from: current.end,
+        to: next.start,
+        duration: next.start - current.end
+      });
+    }
+  }
+
+  if (gaps.length > 0) {
+    console.warn('🎬 [assertSeamlessClips] Timeline gaps detected (may cause playback interruptions):', gaps);
+  }
+
+  // Check for overlapping clips on same track
+  const overlaps: Array<{clip1: string, clip2: string, overlap_duration: number}> = [];
+  const track0Clips = videoClips.filter(c => c.track === 0);
+  
+  for (let i = 0; i < track0Clips.length - 1; i++) {
+    const current = track0Clips[i];
+    const next = track0Clips[i + 1];
+    
+    if (current.end > next.start) {
+      overlaps.push({
+        clip1: current.name,
+        clip2: next.name,
+        overlap_duration: current.end - next.start
+      });
+    }
+  }
+
+  if (overlaps.length > 0) {
+    console.warn('🎬 [assertSeamlessClips] Overlapping clips detected on track 0:', overlaps);
+  }
+
+  // Success message for valid timeline
+  if (invalidClips.length === 0 && gaps.length === 0 && overlaps.length === 0) {
+    console.log(`🎬 [assertSeamlessClips] ✅ Timeline structure valid for seamless playback (${videoClips.length} video clips)`);
+  }
 };
 
 interface EditorState {
   clips: Clip[];
   currentTime: number;
   duration: number;
+  isPlaying: boolean; // Track video playback state for timeline optimization
   selectedClipId: string | null;
   selectedClipIds: string[]; // Multi-selection support
   activeVideoAsset: any | null;
@@ -250,8 +391,9 @@ interface EditorStore extends EditorState {
   updateClip: (id: string, updates: Partial<Clip>) => void;
   moveClip: (id: string, newTrack: number, newStart: number, newEnd: number) => void;
   deleteClip: (id: string) => void;
-  setCurrentTime: (time: number) => void;
+  setCurrentTime: (time: number, isPlaybackUpdate?: boolean) => void;
   setDuration: (duration: number) => void;
+  setIsPlaying: (playing: boolean) => void;
   setSelectedClipId: (id: string | null) => void;
   setActiveVideoAsset: (asset: any | null) => void;
   
@@ -369,6 +511,7 @@ export const useEditorStore = create<EditorStore>()(
       clips: [],
       currentTime: 0,
       duration: 0,
+      isPlaying: false,
       selectedClipId: null,
       selectedClipIds: [],
       activeVideoAsset: null,
@@ -426,23 +569,41 @@ export const useEditorStore = create<EditorStore>()(
           return;
         }
         
-        // Deep comparison for meaningful changes
-        if (currentClips.length === clips.length) {
-          const hasChanges = clips.some((clip, index) => {
-            const currentClip = currentClips[index];
-            return !currentClip || 
-                   clip.id !== currentClip.id ||
-                   clip.start !== currentClip.start ||
-                   clip.end !== currentClip.end ||
-                   clip.track !== currentClip.track ||
-                   clip.type !== currentClip.type ||
-                   clip.name !== currentClip.name;
-          });
-          
-          if (!hasChanges) {
-            console.log("🎬 [Store] setClips skipped - no meaningful changes detected");
-            return;
-          }
+        // Deep comparison for meaningful changes (ID-based, not index-based)
+        const normalize = (c: Clip) => ({
+          id: c.id,
+          name: c.name,
+          type: c.type,
+          track: c.track,
+          start: c.start,
+          end: c.end,
+          duration: c.end - c.start,     // derive to avoid stale values
+          in_point: c.in_point ?? 0,
+          file_path: c.file_path ?? ''
+        });
+
+        const currentById = new Map(currentClips.map(c => [c.id, c]));
+        const incomingById = new Map(clips.map(c => [c.id, c]));
+
+        const hasChanges =
+          clips.length !== currentClips.length ||
+          // A clip was added or removed, or any normalized field differs
+          clips.some(newClip => {
+            const oldClip = currentById.get(newClip.id);
+            if (!oldClip) return true;
+            const a = normalize(newClip);
+            const b = normalize(oldClip);
+            for (const k of Object.keys(a) as (keyof typeof a)[]) {
+              if (a[k] !== (b as any)[k]) return true;
+            }
+            return false;
+          }) ||
+          // A clip was deleted
+          currentClips.some(oldClip => !incomingById.has(oldClip.id));
+
+        if (!hasChanges) {
+          console.log("🎬 [Store] setClips skipped - no meaningful changes detected");
+          return;
         }
         
         // Add recursion protection
@@ -460,8 +621,15 @@ export const useEditorStore = create<EditorStore>()(
           try {
             const state = get();
             if (state._isUpdatingClips) {
-              state.recalculateDuration();
-              state.pushToHistory();
+              // Skip expensive operations during active playback to prevent visual glitches
+              if (!state.isPlaying) {
+                state.recalculateDuration();
+                state.pushToHistory();
+                
+                // Dev-only validation for seamless player requirements
+                assertSeamlessClips(clips);
+              }
+              
               set({ _isUpdatingClips: false });
             }
           } catch (error) {
@@ -534,12 +702,21 @@ export const useEditorStore = create<EditorStore>()(
         get().pushToHistory();
       },
       
-      setCurrentTime: (time) => {
+      setCurrentTime: (time, isPlaybackUpdate = false) => {
         set({ currentTime: time });
+        
+        // Skip expensive operations during active playback to prevent visual glitches
+        if (isPlaybackUpdate && get().isPlaying) {
+          return; // Just update time, skip validation and history during playback
+        }
       },
       
       setDuration: (duration) => {
         set({ duration });
+      },
+      
+      setIsPlaying: (playing) => {
+        set({ isPlaying: playing });
       },
       
       setSelectedClipId: (id) => {
@@ -1899,4 +2076,64 @@ export const getLayerColor = (layer: LayerType): string => {
     [LayerType.AUDIO]: '#EF4444'      // Red
   };
   return colors[layer] || '#6B7280';
+};
+
+// Utility function to find clip at a specific timeline position
+export const findClipAtTimelinePosition = (clips: any[], time: number): {
+  clip: any | null;
+  isInGap: boolean;
+  gapStart?: number;
+  gapEnd?: number;
+} => {
+  if (!clips || clips.length === 0) {
+    return { clip: null, isInGap: false };
+  }
+
+  // Sort clips by start time
+  const sortedClips = [...clips].sort((a, b) => a.start - b.start);
+
+  // Find clip that contains the time
+  const currentClip = sortedClips.find(clip => time >= clip.start && time < clip.end);
+  
+  if (currentClip) {
+    return { clip: currentClip, isInGap: false };
+  }
+
+  // Check if we're in a gap between clips
+  for (let i = 0; i < sortedClips.length - 1; i++) {
+    const currentClipEnd = sortedClips[i].end;
+    const nextClipStart = sortedClips[i + 1].start;
+    
+    if (time >= currentClipEnd && time < nextClipStart) {
+      return {
+        clip: null,
+        isInGap: true,
+        gapStart: currentClipEnd,
+        gapEnd: nextClipStart
+      };
+    }
+  }
+
+  // Check if we're before the first clip
+  if (time < sortedClips[0].start) {
+    return {
+      clip: null,
+      isInGap: true,
+      gapStart: 0,
+      gapEnd: sortedClips[0].start
+    };
+  }
+
+  // Check if we're after the last clip
+  const lastClip = sortedClips[sortedClips.length - 1];
+  if (time >= lastClip.end) {
+    return {
+      clip: null,
+      isInGap: true,
+      gapStart: lastClip.end,
+      gapEnd: undefined // Open-ended gap
+    };
+  }
+
+  return { clip: null, isInGap: false };
 };

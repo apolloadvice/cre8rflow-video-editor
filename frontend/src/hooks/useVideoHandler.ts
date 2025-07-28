@@ -1,8 +1,9 @@
 import { useState, useEffect } from "react";
 import { useToast } from "@/hooks/use-toast";
-import { useEditorStore, Clip } from "@/store/editorStore";
+import { useEditorStore, Clip, createClip } from "@/store/editorStore";
 import { updateAssetDuration } from "@/api/apiClient";
 import { supabase } from "@/integrations/supabase/client";
+import { convertClipsToOTIOTimeline } from "@/utils/timelineAdapter";
 
 // Utility function to check if two clips overlap
 const clipsOverlap = (clip1: { start: number; end: number }, clip2: { start: number; end: number }) => {
@@ -236,6 +237,74 @@ export const useVideoHandler = () => {
     getAssetById
   } = useEditorStore();
 
+  // 🔍 Enhanced Debug Logging: Track all setClips calls with source tracking
+  const debugSetClips = (newClips: any[], source: string) => {
+    const timestamp = new Date().toISOString();
+    console.log(`🔍 [useVideoHandler] [${timestamp}] setClips called from: ${source}`);
+    console.log(`🔍 [useVideoHandler] Previous clip count: ${clips.length}`);
+    console.log(`🔍 [useVideoHandler] New clip count: ${newClips.length}`);
+    console.log(`🔍 [useVideoHandler] Previous clips:`, clips.map(c => ({ id: c.id, name: c.name, start: c.start, end: c.end, track: c.track })));
+    console.log(`🔍 [useVideoHandler] New clips:`, newClips.map(c => ({ id: c.id, name: c.name, start: c.start, end: c.end, track: c.track })));
+    
+    setClips(newClips);
+    
+    // Verify clips after a short delay to catch any immediate overrides
+    setTimeout(() => {
+      const currentClips = useEditorStore.getState().clips;
+      if (currentClips.length !== newClips.length) {
+        console.error(`🔍 [useVideoHandler] CLIPS MISMATCH after ${source}! Expected: ${newClips.length}, Got: ${currentClips.length}`);
+        console.error(`🔍 [useVideoHandler] Current clips after ${source}:`, currentClips.map(c => ({ id: c.id, name: c.name })));
+      } else {
+        console.log(`🔍 [useVideoHandler] ✅ Clips verified after ${source}: ${currentClips.length} clips`);
+      }
+    }, 100);
+  };
+  
+  // Modern v2 API auto-save function
+  const saveTimelineV2 = async (clips: Clip[], primaryAssetPath: string) => {
+    try {
+      console.log("💾 [Video Handler] Auto-saving timeline via v2 API...");
+      console.log("💾 [Video Handler] Clips to save:", clips.length);
+      
+      if (clips.length === 0) {
+        console.warn("⚠️ [Video Handler] No clips to save, skipping auto-save");
+        return { success: false, message: "No clips to save" };
+      }
+      
+      // Convert clips to OTIO timeline format
+      const otioTimeline = convertClipsToOTIOTimeline(clips);
+      
+      // Use a simple "save timeline" command through our v2 API
+      const response = await fetch('/api/command/v2', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          command: "save timeline",
+          asset_path: primaryAssetPath,
+          timeline_format: "otio",
+          migration_mode: true,
+          current_timeline: otioTimeline
+        })
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ detail: response.statusText }));
+        throw new Error(errorData.detail || `HTTP ${response.status}: ${response.statusText}`);
+      }
+      
+      const result = await response.json();
+      console.log("✅ [Video Handler] Timeline auto-saved via v2 API successfully");
+      
+      return { success: true, message: result.message || "Timeline saved" };
+      
+    } catch (error: any) {
+      console.error("❌ [Video Handler] V2 API auto-save failed:", error);
+      return { success: false, message: error.message || "Auto-save failed" };
+    }
+  };
+
   const handleVideoSelect = (video: any) => {
     setClips([]);
     setActiveVideoAsset(video);
@@ -270,17 +339,18 @@ export const useVideoHandler = () => {
       // Find the best track and position for this video clip
       const { track: bestTrack, startTime: adjustedStartTime } = findBestTrack(clips, 'video', dropTime, clipDuration);
       
-      const newClip: Clip = {
+      const newClip = createClip({
         id: `clip-${Date.now()}`,
+        name: file.name,
         start: adjustedStartTime,
         end: adjustedStartTime + clipDuration,
         track: bestTrack,
         type: "video",
-        name: file.name,
-        thumbnail: thumbnail // Include generated thumbnail
-      };
+        thumbnail: thumbnail, // Include generated thumbnail
+        in_point: 0 // Default source media in-point
+      });
       
-      setClips([...clips, newClip]);
+      debugSetClips([...clips, newClip], 'video_file_drop');
       setSelectedClipId(newClip.id);
       
       if (!videoSrc) {
@@ -365,8 +435,8 @@ export const useVideoHandler = () => {
       thumbnailLength: thumbnail.length
     });
 
-    // Create a backend-ready timeline clip with the generated thumbnail
-    const newClip: Clip = {
+    // Create a backend-ready timeline clip with the generated thumbnail using createClip helper
+    const newClip = createClip({
       id: `clip-${Date.now()}`,
       name: asset.name,
       start: adjustedStartTime,
@@ -375,13 +445,52 @@ export const useVideoHandler = () => {
       type: "video",
       file_path: asset.file_path,
       thumbnail: thumbnail, // Use generated thumbnail from Supabase video
+      in_point: 0, // Default source media in-point
       effects: [],
       _type: "VideoClip"
-    } as any;
+    });
     
     console.log("🎬 [Video Handler] Adding clip to timeline:", newClip);
     const updatedClips = [...clips, newClip];
-    setClips(updatedClips);
+    
+    // 🔍 DEBUG LOGGING: Show timeline state before and after drop
+    console.log("🎬 [DRAG & DROP DEBUG] Frontend timeline state BEFORE drop:");
+    console.log("🎬 [DRAG & DROP DEBUG] Total clips before:", clips.length);
+    clips.forEach((clip, i) => {
+      console.log(`🎬 [DRAG & DROP DEBUG] Existing clip ${i+1}:`, {
+        id: clip.id,
+        name: clip.name,
+        file_path: clip.file_path,
+        start: clip.start,
+        end: clip.end,
+        track: clip.track,
+        duration: clip.duration || (clip.end - clip.start)
+      });
+    });
+    
+    console.log("🎬 [DRAG & DROP DEBUG] Frontend timeline state AFTER drop:");
+    console.log("🎬 [DRAG & DROP DEBUG] Total clips after:", updatedClips.length);
+    updatedClips.forEach((clip, i) => {
+      console.log(`🎬 [DRAG & DROP DEBUG] Final clip ${i+1}:`, {
+        id: clip.id,
+        name: clip.name,
+        file_path: clip.file_path,
+        start: clip.start,
+        end: clip.end,
+        track: clip.track,
+        duration: clip.duration || (clip.end - clip.start)
+      });
+    });
+    
+    debugSetClips(updatedClips, 'single_video_asset_drop');
+    
+    // 💾 AUTO-SAVE: Save timeline to backend after adding clip using v2 API
+    const saveResult = await saveTimelineV2(updatedClips, asset.file_path);
+    if (saveResult.success) {
+      console.log("✅ [Video Handler] Single clip timeline auto-saved successfully");
+    } else {
+      console.warn("⚠️ [Video Handler] Single clip timeline auto-save failed:", saveResult.message);
+    }
     
     // Duration will be recalculated automatically by the store
     
@@ -490,8 +599,8 @@ export const useVideoHandler = () => {
         track: track
       });
 
-      // Create a backend-ready timeline clip with the generated thumbnail
-      const newClip: Clip = {
+      // Create a backend-ready timeline clip with the generated thumbnail using createClip helper
+      const newClip = createClip({
         id: `clip-${Date.now()}-${Math.random()}`,
         name: asset.name,
         start: clipStartTime,
@@ -500,9 +609,10 @@ export const useVideoHandler = () => {
         type: "video",
         file_path: asset.file_path,
         thumbnail: thumbnail, // Use generated thumbnail from Supabase video
+        in_point: 0, // Default source media in-point
         effects: [],
         _type: "VideoClip"
-      } as any;
+      });
       
       newClips.push(newClip);
       
@@ -523,11 +633,25 @@ export const useVideoHandler = () => {
       
       // Add all clips at once
       const updatedClips = [...clips, ...newClips];
-      setClips(updatedClips);
+      debugSetClips(updatedClips, 'multiple_video_asset_drop');
       
       // Duration will be recalculated automatically by the store
       
       setSelectedClipId(newClips[newClips.length - 1].id); // Select the last added clip
+      
+      // 💾 AUTO-SAVE: Save timeline to backend after adding multiple clips using v2 API
+      // Use the first asset's file path as the primary save path
+      const firstAsset = videoAssets[0];
+      const primaryAsset = getAssetById ? getAssetById(firstAsset.id) : firstAsset;
+      const saveAssetPath = primaryAsset?.file_path || 'default_timeline';
+      
+      const saveResult = await saveTimelineV2(updatedClips, saveAssetPath);
+      if (saveResult.success) {
+        console.log("✅ [Video Handler] Multi-asset timeline auto-saved successfully");
+        console.log("✅ [Video Handler] Saved under asset path:", saveAssetPath);
+      } else {
+        console.warn("⚠️ [Video Handler] Multi-asset timeline auto-save failed:", saveResult.message);
+      }
       
       // Set the video source for the player if we don't have one yet
       if (!videoSrc || clips.length === 0) {
@@ -607,7 +731,7 @@ export const useVideoHandler = () => {
             return clip;
           });
           console.log("🎬 [Video Handler] Updated clips:", updatedClips);
-          setClips(updatedClips);
+          debugSetClips(updatedClips, 'video_processed_preserve_timeline');
         } else {
           console.log("🎬 [Video Handler] No existing clips, creating new clip for processed video");
           // If no clips exist, create a single clip for the processed video
@@ -620,7 +744,7 @@ export const useVideoHandler = () => {
             name: newVideoAsset.name
           };
           console.log("🎬 [Video Handler] Created new clip:", newClip);
-          setClips([newClip]);
+          debugSetClips([newClip], 'video_processed_new_clip');
         }
         
         // Don't reset current time if user is in the middle of editing

@@ -27,6 +27,7 @@ class CommandRequestV2(BaseModel):
     asset_path: str 
     timeline_format: Optional[str] = "auto"  # "legacy", "otio", "auto"
     migration_mode: Optional[bool] = False   # Enable migration during operation
+    current_timeline: Optional[Dict[str, Any]] = None  # Fallback timeline from frontend
 
 
 class CommandResponseV2(BaseModel):
@@ -55,8 +56,8 @@ async def apply_command_v2(payload: CommandRequestV2):
     logging.info(f"[apply_command_v2] Timeline format: {payload.timeline_format}, Migration mode: {payload.migration_mode}")
     
     try:
-        # 1. Load timeline using migration service
-        timeline_adapter = await load_timeline_with_adapter(payload.asset_path)
+        # 1. Load timeline using migration service with fallback support
+        timeline_adapter = await load_timeline_with_adapter(payload.asset_path, payload.current_timeline)
         if timeline_adapter is None:
             return CommandResponseV2(
                 status="error",
@@ -70,6 +71,37 @@ async def apply_command_v2(payload: CommandRequestV2):
         original_format = "otio" if timeline_adapter.is_otio else "legacy"
         logging.info(f"[apply_command_v2] Loaded timeline format: {original_format}")
         
+        # 🔍 DEBUG LOGGING: Show timeline state when command is received
+        try:
+            clips_data = timeline_adapter.get_clips_for_api()
+            logging.info(f"🎬 [COMMAND DEBUG] Command '{payload.command}' received for asset: {payload.asset_path}")
+            logging.info(f"🎬 [COMMAND DEBUG] Timeline contains {len(clips_data)} clips before command:")
+            for i, clip in enumerate(clips_data):
+                clip_info = {
+                    "index": i,
+                    "id": clip.get("id", "N/A"),
+                    "name": clip.get("name", "N/A"), 
+                    "file_path": clip.get("file_path", "N/A"),
+                    "start": clip.get("start", "N/A"),
+                    "end": clip.get("end", "N/A"),
+                    "track": clip.get("track", "N/A"),
+                    "duration": clip.get("duration", "N/A")
+                }
+                logging.info(f"🎬 [COMMAND DEBUG] Clip {i+1}: {clip_info}")
+                
+            # Debug raw OTIO timeline structure
+            if hasattr(timeline_adapter, 'timeline') and hasattr(timeline_adapter.timeline, 'tracks'):
+                logging.info(f"🎬 [COMMAND DEBUG] Raw OTIO timeline has {len(timeline_adapter.timeline.tracks)} tracks")
+                for track_idx, track in enumerate(timeline_adapter.timeline.tracks):
+                    logging.info(f"🎬 [COMMAND DEBUG] Track {track_idx}: {track.name} ({track.track_type}) with {len(track.children)} children")
+                    for child_idx, child in enumerate(track.children):
+                        child_name = getattr(child, 'name', 'Unknown')
+                        child_type = getattr(child, '_type', 'Unknown')
+                        logging.info(f"🎬 [COMMAND DEBUG]   Child {child_idx}: {child_name} ({child_type})")
+                        
+        except Exception as debug_error:
+            logging.warning(f"🎬 [COMMAND DEBUG] Could not log clips: {debug_error}")
+        
         # 2. Auto-migrate to OTIO for better operations (unless specifically avoiding it)
         migration_performed = False
         if not timeline_adapter.is_otio:
@@ -79,6 +111,36 @@ async def apply_command_v2(payload: CommandRequestV2):
         
         # 3. Parse and execute command using OTIO adapter
         result = await execute_command_with_adapter(timeline_adapter, payload.command, payload.asset_path)
+        
+        # 🔍 DEBUG LOGGING: Show timeline state after command is executed
+        try:
+            clips_data_after = timeline_adapter.get_clips_for_api()
+            logging.info(f"🎬 [COMMAND DEBUG] Timeline contains {len(clips_data_after)} clips AFTER command:")
+            for i, clip in enumerate(clips_data_after):
+                clip_info = {
+                    "index": i,
+                    "id": clip.get("id", "N/A"),
+                    "name": clip.get("name", "N/A"), 
+                    "file_path": clip.get("file_path", "N/A"),
+                    "start": clip.get("start", "N/A"),
+                    "end": clip.get("end", "N/A"),
+                    "track": clip.get("track", "N/A"),
+                    "duration": clip.get("duration", "N/A")
+                }
+                logging.info(f"🎬 [COMMAND DEBUG] Final Clip {i+1}: {clip_info}")
+                
+            # Debug raw OTIO timeline structure after command
+            if hasattr(timeline_adapter, 'timeline') and hasattr(timeline_adapter.timeline, 'tracks'):
+                logging.info(f"🎬 [COMMAND DEBUG] Final OTIO timeline has {len(timeline_adapter.timeline.tracks)} tracks")
+                for track_idx, track in enumerate(timeline_adapter.timeline.tracks):
+                    logging.info(f"🎬 [COMMAND DEBUG] Final Track {track_idx}: {track.name} ({track.track_type}) with {len(track.children)} children")
+                    for child_idx, child in enumerate(track.children):
+                        child_name = getattr(child, 'name', 'Unknown')
+                        child_type = getattr(child, '_type', 'Unknown')
+                        logging.info(f"🎬 [COMMAND DEBUG]   Final Child {child_idx}: {child_name} ({child_type})")
+                        
+        except Exception as debug_error:
+            logging.warning(f"🎬 [COMMAND DEBUG] Could not log final clips: {debug_error}")
         
         # 4. Prepare response
         final_format = "otio" if timeline_adapter.is_otio else "legacy"
@@ -109,40 +171,243 @@ async def apply_command_v2(payload: CommandRequestV2):
         )
 
 
-async def load_timeline_with_adapter(asset_path: str) -> Optional[TimelineAdapter]:
+async def load_timeline_with_adapter(asset_path: str, current_timeline: Optional[Dict[str, Any]] = None) -> Optional[TimelineAdapter]:
     """
     Load timeline using the migration service adapter.
     Enhanced to load complete multi-asset timelines.
     """
+    logging.info(f"[load_timeline_with_adapter] Called with asset_path: {asset_path}, current_timeline provided: {current_timeline is not None}")
     try:
+        # 🔧 FIX: Prioritize current_timeline from frontend when available to avoid database loading issues
+        fallback_timeline = None
+        fallback_clip_count = 0
+        
+        # Try to use current_timeline from frontend first
+        if current_timeline and current_timeline.get("_type") == "OTIOTimeline":
+            logging.info(f"[load_timeline_with_adapter] Frontend timeline available, processing...")
+            
+            # Count clips in current_timeline
+            for track in current_timeline.get('tracks', []):
+                children = track.get('children', []) if isinstance(track, dict) else []
+                fallback_clip_count += len([child for child in children if isinstance(child, dict) and child.get('_type') == 'OTIOClip'])
+            
+            logging.info(f"[load_timeline_with_adapter] Frontend timeline has {fallback_clip_count} clips")
+            
+            if fallback_clip_count > 0:
+                try:
+                    # 🔧 FIX: Manually construct OTIO timeline from frontend data instead of using non-existent method
+                    from app.otio_timeline import OTIOTimeline, OTIOTrack, OTIOClip, MediaReference, TimeRange, RationalTime
+                    
+                    # Create new OTIO timeline
+                    fallback_timeline = OTIOTimeline(
+                        name=current_timeline.get("name", "Frontend Timeline"),
+                        fps=current_timeline.get("fps", 30.0),
+                        timeline_id=current_timeline.get("id")
+                    )
+                    
+                    # Clear default tracks and recreate from frontend data
+                    fallback_timeline.tracks = []
+                    
+                    # Reconstruct tracks from frontend data
+                    for track_data in current_timeline.get("tracks", []):
+                        track = OTIOTrack(
+                            name=track_data.get("name", "Track"),
+                            track_type=track_data.get("track_type", "video")
+                        )
+                        
+                        # Reconstruct clips in track
+                        for child_data in track_data.get("children", []):
+                            if child_data.get("_type") == "OTIOClip":
+                                # Create media reference
+                                media_ref_data = child_data.get("media_reference", {})
+                                media_ref = MediaReference(
+                                    id=media_ref_data.get("id", f"media_{child_data.get('id', 'unknown')}"),
+                                    url=media_ref_data.get("url", ""),
+                                    metadata=media_ref_data.get("metadata", {})
+                                )
+                                
+                                # Create source range if provided
+                                source_range = None
+                                if child_data.get("source_range"):
+                                    sr_data = child_data["source_range"]
+                                    source_range = TimeRange(
+                                        start_time=RationalTime(
+                                            value=sr_data.get("start_time", {}).get("value", 0),
+                                            rate=sr_data.get("start_time", {}).get("rate", fallback_timeline.fps)
+                                        ),
+                                        duration=RationalTime(
+                                            value=sr_data.get("duration", {}).get("value", 30),
+                                            rate=sr_data.get("duration", {}).get("rate", fallback_timeline.fps)
+                                        )
+                                    )
+                                
+                                # Create clip
+                                clip = OTIOClip(
+                                    name=child_data.get("name", "Clip"),
+                                    media_reference=media_ref,
+                                    source_range=source_range,
+                                    clip_id=child_data.get("id", f"clip_{len(track.children)}"),
+                                    metadata=child_data.get("metadata", {})
+                                )
+                                track.children.append(clip)
+                        
+                        fallback_timeline.tracks.append(track)
+                    
+                    logging.info(f"[load_timeline_with_adapter] ✅ Successfully constructed timeline from frontend with {fallback_clip_count} clips")
+                    
+                    # Return the constructed timeline immediately if successful
+                    from app.timeline_adapter import TimelineAdapter
+                    return TimelineAdapter(fallback_timeline)
+                    
+                except Exception as e:
+                    logging.error(f"[load_timeline_with_adapter] Failed to construct frontend timeline: {e}")
+                    import traceback
+                    logging.error(f"[load_timeline_with_adapter] Traceback: {traceback.format_exc()}")
+                    fallback_timeline = None
+        
+        # If frontend timeline construction failed or not available, try database loading
+        logging.info(f"[load_timeline_with_adapter] Frontend timeline not available or failed, trying database loading...")
+        
         # Import existing timeline loading logic
         from app.backend.command_api import load_timeline_from_db_robust
         
-        # ENHANCED: Try to load timeline by asset_path first
-        legacy_timeline = load_timeline_from_db_robust(
-            asset_path, 
-            validate_assets=False, 
-            allow_partial_load=True
-        )
+        # Try to load timeline by asset_path from database
+        legacy_timeline = None
+        try:
+            legacy_timeline = load_timeline_from_db_robust(
+                asset_path, 
+                validate_assets=False, 
+                allow_partial_load=True
+            )
+        except Exception as db_error:
+            logging.error(f"[load_timeline_with_adapter] Database loading failed: {db_error}")
+            legacy_timeline = None
         
-        # ENHANCED: If no timeline found for this asset, try to find ANY timeline
-        # that contains clips (for multi-asset projects)
-        if not legacy_timeline or (hasattr(legacy_timeline, 'get_all_clips') and len(legacy_timeline.get_all_clips()) == 0):
-            logging.info(f"[load_timeline_with_adapter] No timeline found for {asset_path}, searching for any existing timeline")
-            legacy_timeline = await load_any_existing_timeline_with_clips()
+        # ENHANCED FALLBACK: Prioritize current_timeline from frontend if provided and has clips
+        if current_timeline and current_timeline.get("_type") == "OTIOTimeline":
+            logging.info(f"[load_timeline_with_adapter] Frontend fallback timeline available")
             
-            if legacy_timeline:
+            # Count clips in current_timeline to see if it's better than what we loaded from database
+            for track in current_timeline.get('tracks', []):
+                children = track.get('children', []) if isinstance(track, dict) else []
+                fallback_clip_count += len([child for child in children if isinstance(child, dict) and child.get('_type') == 'OTIOClip'])
+            
+            logging.info(f"[load_timeline_with_adapter] Frontend fallback has {fallback_clip_count} clips")
+            
+            if fallback_clip_count > 0:
+                try:
+                    # 🔧 FIX: Manually construct OTIO timeline from frontend data instead of using non-existent method
+                    from app.otio_timeline import OTIOTimeline, OTIOTrack, OTIOClip, MediaReference, TimeRange, RationalTime
+                    
+                    # Create new OTIO timeline
+                    fallback_timeline = OTIOTimeline(
+                        name=current_timeline.get("name", "Frontend Timeline"),
+                        fps=current_timeline.get("fps", 30.0),
+                        timeline_id=current_timeline.get("id")
+                    )
+                    
+                    # Clear default tracks and recreate from frontend data
+                    fallback_timeline.tracks = []
+                    
+                    # Reconstruct tracks from frontend data
+                    for track_data in current_timeline.get("tracks", []):
+                        track = OTIOTrack(
+                            name=track_data.get("name", "Track"),
+                            track_type=track_data.get("track_type", "video")
+                        )
+                        
+                        # Reconstruct clips in track
+                        for child_data in track_data.get("children", []):
+                            if child_data.get("_type") == "OTIOClip":
+                                # Create media reference
+                                media_ref_data = child_data.get("media_reference", {})
+                                media_ref = MediaReference(
+                                    id=media_ref_data.get("id", f"media_{child_data.get('id', 'unknown')}"),
+                                    url=media_ref_data.get("url", ""),
+                                    metadata=media_ref_data.get("metadata", {})
+                                )
+                                
+                                # Create source range if provided
+                                source_range = None
+                                if child_data.get("source_range"):
+                                    sr_data = child_data["source_range"]
+                                    source_range = TimeRange(
+                                        start_time=RationalTime(
+                                            value=sr_data.get("start_time", {}).get("value", 0),
+                                            rate=sr_data.get("start_time", {}).get("rate", fallback_timeline.fps)
+                                        ),
+                                        duration=RationalTime(
+                                            value=sr_data.get("duration", {}).get("value", 30),
+                                            rate=sr_data.get("duration", {}).get("rate", fallback_timeline.fps)
+                                        )
+                                    )
+                                
+                                # Create clip
+                                clip = OTIOClip(
+                                    name=child_data.get("name", "Clip"),
+                                    media_reference=media_ref,
+                                    source_range=source_range,
+                                    clip_id=child_data.get("id", f"clip_{len(track.children)}"),
+                                    metadata=child_data.get("metadata", {})
+                                )
+                                track.children.append(clip)
+                        
+                        fallback_timeline.tracks.append(track)
+                    
+                    logging.info(f"[load_timeline_with_adapter] ✅ Successfully constructed timeline from frontend fallback with {fallback_clip_count} clips")
+                except Exception as e:
+                    logging.error(f"[load_timeline_with_adapter] Failed to construct frontend fallback timeline: {e}")
+                    import traceback
+                    logging.error(f"[load_timeline_with_adapter] Traceback: {traceback.format_exc()}")
+                    fallback_timeline = None
+        
+        # Get current timeline clip count
+        current_clip_count = 0
+        if legacy_timeline and hasattr(legacy_timeline, 'get_all_clips'):
+            current_clip_count = len(legacy_timeline.get_all_clips())
+        elif legacy_timeline and hasattr(legacy_timeline, 'tracks'):
+            for track in legacy_timeline.tracks:
+                # Handle both OTIO tracks (children) and legacy tracks (clips)
+                if hasattr(track, 'children'):
+                    current_clip_count += len([child for child in track.children if getattr(child, '_type', None) == 'OTIOClip'])
+                elif hasattr(track, 'clips'):
+                    current_clip_count += len(track.clips)
+        
+        logging.info(f"[load_timeline_with_adapter] Database timeline has {current_clip_count} clips")
+        
+        # Use fallback if it has more clips than database timeline
+        if fallback_timeline and (not legacy_timeline or current_clip_count == 0 or fallback_clip_count > current_clip_count):
+            logging.info(f"[load_timeline_with_adapter] Using frontend fallback timeline ({fallback_clip_count} clips > {current_clip_count} clips)")
+            legacy_timeline = fallback_timeline
+        
+        # If still no timeline or empty, try to find ANY existing timeline with clips
+        elif not legacy_timeline or current_clip_count == 0:
+            logging.info(f"[load_timeline_with_adapter] No good timeline found for {asset_path}, searching for any existing timeline")
+            existing_timeline = await load_any_existing_timeline_with_clips()
+            
+            if existing_timeline:
                 logging.info(f"[load_timeline_with_adapter] Found existing timeline with clips, using that instead")
+                legacy_timeline = existing_timeline
         
         # Check if timeline is empty and needs initial video clip
         timeline_is_empty = False
         if legacy_timeline is not None:
             if hasattr(legacy_timeline, 'get_all_clips'):
-                # OTIO timeline
+                # OTIO timeline with get_all_clips method
                 timeline_is_empty = len(legacy_timeline.get_all_clips()) == 0
+            elif hasattr(legacy_timeline, 'tracks'):
+                # Timeline with tracks (either OTIO or legacy)
+                total_clips = 0
+                for track in legacy_timeline.tracks:
+                    if hasattr(track, 'children'):
+                        # OTIO track
+                        total_clips += len([child for child in track.children if getattr(child, '_type', None) == 'OTIOClip'])
+                    elif hasattr(track, 'clips'):
+                        # Legacy track
+                        total_clips += len(track.clips)
+                timeline_is_empty = total_clips == 0
             else:
-                # Legacy timeline  
-                timeline_is_empty = sum(len(track.clips) for track in legacy_timeline.tracks) == 0
+                timeline_is_empty = True
         
         if legacy_timeline is None or timeline_is_empty:
             if legacy_timeline is None:
@@ -180,7 +445,13 @@ async def load_timeline_with_adapter(asset_path: str) -> Optional[TimelineAdapte
         return TimelineAdapter(legacy_timeline)
         
     except Exception as e:
-        logging.error(f"[load_timeline_with_adapter] Failed to load timeline: {e}")
+        error_msg = f"[load_timeline_with_adapter] Failed to load timeline: {e}"
+        logging.error(error_msg)
+        print(error_msg)  # Also print to stdout for debugging
+        import traceback
+        traceback_msg = f"[load_timeline_with_adapter] Traceback: {traceback.format_exc()}"
+        logging.error(traceback_msg)
+        print(traceback_msg)  # Also print to stdout for debugging
         return None
 
 
