@@ -132,4 +132,52 @@ def timestamp_to_frames(timestamp, frame_rate):
         if timestamp.endswith("s"):
             return int(float(timestamp[:-1]) * frame_rate)
         return int(float(timestamp) * frame_rate)
-    return int(timestamp) 
+    return int(timestamp)
+
+def _parse_time_to_seconds(time_str: str, duration: Optional[float] = None) -> float:
+    """
+    Parse a time string to seconds, supporting multiple formats.
+    
+    Args:
+        time_str (str): Time string like "10", "1:30", "00:01:30"
+        duration (Optional[float]): Total duration for validation
+        
+    Returns:
+        float: Time in seconds
+        
+    Raises:
+        ValueError: If time string cannot be parsed
+    """
+    time_str = time_str.strip()
+    
+    # Handle mm:ss and hh:mm:ss formats
+    if ":" in time_str:
+        parts = time_str.split(":")
+        if len(parts) == 2:  # mm:ss
+            minutes, seconds = map(float, parts)
+            return minutes * 60 + seconds
+        elif len(parts) == 3:  # hh:mm:ss
+            hours, minutes, seconds = map(float, parts)
+            return hours * 3600 + minutes * 60 + seconds
+        else:
+            raise ValueError(f"Invalid time format: {time_str}")
+    
+    # Handle decimal seconds
+    try:
+        return float(time_str)
+    except ValueError:
+        raise ValueError(f"Cannot parse time string: {time_str}")
+
+def get_asset_duration(asset_path: str) -> Optional[float]:
+    """
+    Get the duration of a media asset in seconds.
+    
+    Args:
+        asset_path (str): Path to the media file
+        
+    Returns:
+        Optional[float]: Duration in seconds, or None if cannot be determined
+    """
+    # This is a placeholder - in a real implementation, you would use
+    # ffprobe or similar to get the actual duration
+    return 60.0  # Default to 60 seconds 

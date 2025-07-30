@@ -572,65 +572,164 @@ def detect_operation_type(command: str) -> str:
 
 async def handle_cut_out_command(adapter: TimelineAdapter, command: str, asset_path: str) -> Dict[str, Any]:
     """
-    Handle cut out command using adapter's non-destructive operations.
+    Handle cut out command using LLM-first approach with adapter's non-destructive operations.
     
-    Example: "cut out 00:05-00:10" 
+    Examples: "cut out 00:05-00:10", "remove from 10 to 20", "delete between 1:30 and 2:45"
     """
-    # Parse time range from command
-    duration = get_asset_duration(asset_path) or 60.0
-    cutout_match = re.search(
-        r"\bcut\s+out\s+([0-9:.a-zA-Z]+)\s*[-–]\s*([0-9:.a-zA-Z]+)",
-        command,
-        re.IGNORECASE,
-    )
-    
-    if not cutout_match:
-        return {
-            "applied": False,
-            "message": "Could not parse cut out range from command",
-            "logs": [f"Failed to parse: {command}"]
-        }
-    
-    start_token = cutout_match.group(1)
-    end_token = cutout_match.group(2)
-    
     try:
-        start_seconds = _parse_time_to_seconds(start_token, duration)
-        end_seconds = _parse_time_to_seconds(end_token, duration)
+        # Use the new CutOutCommandHandler with LLM parsing
+        from app.command_handlers.cut_out import CutOutCommandHandler
         
-        if start_seconds >= end_seconds:
+        # Get current timeline duration for context-aware parsing
+        duration = adapter.duration_seconds or get_asset_duration(asset_path) or 60.0
+        
+        # Initialize handler and set timeline context
+        cut_handler = CutOutCommandHandler()
+        cut_handler.set_timeline_duration(duration)
+        
+        # Check if this is a valid cut_out command using LLM
+        if not cut_handler.match(command):
+            logging.info(f"[handle_cut_out_command] LLM match failed, trying regex fallback for: {command}")
+            
+            # 🔧 FALLBACK: Use regex parsing when LLM fails
+            cutout_match = re.search(
+                r"\bcut\s+out\s+([0-9:.]+(s|sec|seconds)?)\s*[-–]\s*([0-9:.]+(s|sec|seconds)?)",
+                command,
+                re.IGNORECASE
+            )
+            
+            if not cutout_match:
+                return {
+                    "applied": False,
+                    "message": "Command not recognized as cut_out operation or confidence too low",
+                    "logs": [f"Neither LLM nor regex could parse cut_out command: {command}"]
+                }
+            
+            # Parse time range using regex fallback
+            start_token = cutout_match.group(1).replace('s', '').replace('ec', '').replace('onds', '')
+            end_token = cutout_match.group(3).replace('s', '').replace('ec', '').replace('onds', '')
+            
+            try:
+                start_seconds = _parse_time_to_seconds(start_token, duration)
+                end_seconds = _parse_time_to_seconds(end_token, duration)
+                
+                logging.info(f"[handle_cut_out_command] Regex fallback parsed: {start_seconds}s - {end_seconds}s")
+                
+                # Validate the operation
+                if start_seconds >= end_seconds or start_seconds < 0 or end_seconds < 0:
+                    return {
+                        "applied": False,
+                        "message": f"Invalid cut range: {start_seconds:.2f}s - {end_seconds:.2f}s",
+                        "logs": [f"Regex fallback validation failed: {start_seconds:.2f}s - {end_seconds:.2f}s"]
+                    }
+                
+                # Execute cut out using adapter (regex fallback path)
+                success = adapter.cut_out_range(
+                    start_seconds=start_seconds,
+                    end_seconds=end_seconds,
+                    mode='ripple'  # Default to ripple mode (close gap)
+                )
+                
+                if success:
+                    removed_duration = end_seconds - start_seconds
+                    return {
+                        "applied": True,
+                        "message": f"Successfully cut out {start_seconds:.2f}s-{end_seconds:.2f}s (removed {removed_duration:.2f}s) using regex fallback",
+                        "logs": [
+                            f"LLM parsing failed, used regex fallback",
+                            f"Cut out range: {start_seconds:.2f}s to {end_seconds:.2f}s",
+                            f"Mode: ripple (preserve timing)"
+                        ]
+                    }
+                else:
+                    return {
+                        "applied": False,
+                        "message": "Cut out operation failed - adapter could not execute cut",
+                        "logs": [
+                            f"Regex fallback successfully parsed: {start_seconds:.2f}s-{end_seconds:.2f}s", 
+                            "Timeline adapter cut_out_range() returned False"
+                        ]
+                    }
+                    
+            except Exception as fallback_error:
+                logging.error(f"[handle_cut_out_command] Regex fallback error: {fallback_error}")
+                return {
+                    "applied": False,
+                    "message": f"Regex fallback parsing failed: {str(fallback_error)}",
+                    "logs": [f"Regex fallback error: {str(fallback_error)}"]
+                }
+        
+        # Parse the command using LLM
+        frame_rate = int(adapter.fps) if adapter.fps else 30
+        operation = cut_handler.parse(command, frame_rate=frame_rate)
+        
+        if operation.type_ == "UNKNOWN":
+            error_msg = operation.parameters.get("error", "Unknown parsing error")
             return {
                 "applied": False,
-                "message": f"Invalid range: start ({start_seconds:.2f}s) must be less than end ({end_seconds:.2f}s)",
-                "logs": []
+                "message": f"Failed to parse cut_out command: {error_msg}",
+                "logs": [f"LLM parsing failed: {error_msg}"]
+            }
+        
+        # Extract parsed parameters
+        params = operation.parameters
+        start_seconds = params.get("start_time", 0)
+        end_seconds = params.get("end_time", 0)
+        confidence = params.get("confidence", 0)
+        preserve_timing = params.get("preserve_timing", True)
+        
+        logging.info(f"[handle_cut_out_command] LLM parsed cut_out:")
+        logging.info(f"[handle_cut_out_command] Range: {start_seconds}s - {end_seconds}s")
+        logging.info(f"[handle_cut_out_command] Confidence: {confidence}")
+        logging.info(f"[handle_cut_out_command] Preserve timing: {preserve_timing}")
+        
+        # Validate the operation
+        if not cut_handler.validate_cut_operation(start_seconds, end_seconds, duration):
+            return {
+                "applied": False,
+                "message": f"Invalid cut range: {start_seconds:.2f}s - {end_seconds:.2f}s",
+                "logs": [f"Validation failed for range: {start_seconds:.2f}s - {end_seconds:.2f}s"]
             }
         
         # Execute cut out using adapter (handles both timeline formats)
+        mode = 'ripple' if preserve_timing else 'lift'
         success = adapter.cut_out_range(
             start_seconds=start_seconds,
             end_seconds=end_seconds,
-            mode='ripple'  # Default to ripple mode (close gap)
+            mode=mode
         )
         
         if success:
             removed_duration = end_seconds - start_seconds
+            confidence_msg = f" (confidence: {confidence:.1%})" if confidence > 0 else ""
             return {
                 "applied": True,
-                "message": f"Successfully cut out {start_seconds:.2f}s-{end_seconds:.2f}s (removed {removed_duration:.2f}s)",
-                "logs": [f"Cut out range: {start_seconds:.2f}s to {end_seconds:.2f}s"]
+                "message": f"Successfully cut out {start_seconds:.2f}s-{end_seconds:.2f}s (removed {removed_duration:.2f}s){confidence_msg}",
+                "logs": [
+                    f"LLM parsed cut_out command with {confidence:.1%} confidence",
+                    f"Cut out range: {start_seconds:.2f}s to {end_seconds:.2f}s",
+                    f"Mode: {mode} ({'preserve timing' if preserve_timing else 'create gap'})"
+                ]
             }
         else:
             return {
                 "applied": False,
-                "message": "Cut out operation failed",
-                "logs": ["Cut out operation did not succeed"]
+                "message": "Cut out operation failed - adapter could not execute cut",
+                "logs": [
+                    f"LLM successfully parsed: {start_seconds:.2f}s-{end_seconds:.2f}s",
+                    "Timeline adapter cut_out_range() returned False"
+                ]
             }
             
     except Exception as e:
+        logging.error(f"[handle_cut_out_command] Error in LLM-based cut_out: {e}")
+        import traceback
+        logging.error(f"[handle_cut_out_command] Traceback: {traceback.format_exc()}")
+        
         return {
             "applied": False,
             "message": f"Cut out failed: {str(e)}",
-            "logs": [f"Error: {str(e)}"]
+            "logs": [f"Error in LLM cut_out handler: {str(e)}"]
         }
 
 

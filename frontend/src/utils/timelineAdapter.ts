@@ -442,6 +442,86 @@ export const migrationUtils = {
 };
 
 /**
+ * Convert frontend clips to OTIO timeline format
+ */
+export const convertClipsToOTIOTimeline = (clips: Clip[], fps: number = 30): OTIOTimeline => {
+  // Group clips by track
+  const trackMap = new Map<number, Clip[]>();
+  
+  clips.forEach(clip => {
+    if (!trackMap.has(clip.track)) {
+      trackMap.set(clip.track, []);
+    }
+    trackMap.get(clip.track)!.push(clip);
+  });
+
+  // Sort tracks by track number
+  const sortedTracks = Array.from(trackMap.keys()).sort((a, b) => a - b);
+  
+  const otioTracks: OTIOTrack[] = sortedTracks.map(trackIndex => {
+    const trackClips = trackMap.get(trackIndex)!.sort((a, b) => a.start - b.start);
+    const children: (OTIOClip | OTIOGap)[] = [];
+    
+    let currentPosition = 0;
+    
+    trackClips.forEach((clip, index) => {
+      // Add gap if there's space before this clip
+      if (clip.start > currentPosition) {
+        const gapDuration = clip.start - currentPosition;
+        children.push({
+          _type: 'OTIOGap',
+          id: `gap_${trackIndex}_${index}`,
+          name: `Gap`,
+          duration: RationalTimeUtils.fromSeconds(gapDuration, fps)
+        });
+      }
+      
+      // Add the clip
+      const clipDuration = clip.end - clip.start;
+      const otioClip: OTIOClip = {
+        _type: 'OTIOClip',
+        id: clip.id,
+        name: clip.name,
+        media_reference: {
+          id: `media_${clip.id}`,
+          url: clip.file_path || '',
+          metadata: {
+            clip_type: clip.type
+          }
+        },
+        source_range: {
+          start_time: RationalTimeUtils.fromSeconds(clip.in_point || 0, fps),
+          duration: RationalTimeUtils.fromSeconds(clipDuration, fps)
+        }
+      };
+      
+      children.push(otioClip);
+      currentPosition = clip.end;
+    });
+    
+    // Determine track type based on clips
+    const trackType = trackClips.length > 0 ? trackClips[0].type : 'video';
+    const validTrackType = ['video', 'audio', 'text'].includes(trackType) ? trackType as 'video' | 'audio' | 'text' : 'video';
+    
+    return {
+      _type: 'OTIOTrack',
+      id: `track_${trackIndex}`,
+      name: `Track ${trackIndex}`,
+      track_type: validTrackType,
+      children: children
+    };
+  });
+
+  return {
+    _type: 'OTIOTimeline',
+    id: `timeline_${Date.now()}`,
+    name: 'Timeline',
+    fps: fps,
+    tracks: otioTracks
+  };
+};
+
+/**
  * React Hook for Timeline Migration
  */
 export const useTimelineMigration = () => {
@@ -450,6 +530,7 @@ export const useTimelineMigration = () => {
     timelineAPI,
     migrationUtils,
     RationalTimeUtils,
-    TimeRangeUtils
+    TimeRangeUtils,
+    convertClipsToOTIOTimeline
   };
 }; 

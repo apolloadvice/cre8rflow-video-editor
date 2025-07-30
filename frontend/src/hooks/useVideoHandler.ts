@@ -422,8 +422,22 @@ export const useVideoHandler = () => {
       console.error("🎬 [Video Handler] ❌ Failed to generate thumbnail for asset:", asset.name, e);
     }
 
-    // Find the best track and position for this video clip
-    const { track: bestTrack, startTime: adjustedStartTime } = findBestTrack(clips, 'video', dropTime, asset.duration);
+    // 🔧 FIX: Start at 00:00 if timeline is empty, regardless of drop position
+    let adjustedStartTime = dropTime;
+    let bestTrack = track;
+    
+    if (clips.length === 0) {
+      // Empty timeline: Always start at 00:00 on track 0
+      adjustedStartTime = 0;
+      bestTrack = 0;
+      console.log("🎬 [Video Handler] Empty timeline detected - positioning first clip at 00:00 on track 0");
+    } else {
+      // Non-empty timeline: Use smart positioning
+      const result = findBestTrack(clips, 'video', dropTime, asset.duration);
+      bestTrack = result.track;
+      adjustedStartTime = result.startTime;
+      console.log("🎬 [Video Handler] Non-empty timeline - using smart positioning");
+    }
 
     console.log("🎬 [Video Handler] Creating clip with timing:", {
       name: asset.name,
@@ -488,6 +502,13 @@ export const useVideoHandler = () => {
     const saveResult = await saveTimelineV2(updatedClips, asset.file_path);
     if (saveResult.success) {
       console.log("✅ [Video Handler] Single clip timeline auto-saved successfully");
+      
+      // 🎬 IMMEDIATE PLAYBACK: Set video source and start position for seamless playback
+      if (adjustedStartTime === 0 && clips.length === 0) {
+        // First clip at 00:00 - set playhead to beginning for immediate playback
+        setCurrentTime(0);
+        console.log("🎬 [Video Handler] First clip at 00:00 - playhead set to beginning");
+      }
     } else {
       console.warn("⚠️ [Video Handler] Single clip timeline auto-save failed:", saveResult.message);
     }
@@ -547,7 +568,13 @@ export const useVideoHandler = () => {
     console.log("🎬 [Video Handler] Multiple assets dropped:", videoAssets.map(a => a.name));
     console.log("🎬 [Video Handler] Initial drop time:", dropTime, "Initial track:", track);
     
+    // 🔧 FIX: Start at 00:00 if timeline is empty, regardless of drop position
     let currentDropTime = dropTime;
+    if (clips.length === 0) {
+      currentDropTime = 0;
+      console.log("🎬 [Video Handler] Empty timeline detected - starting multi-drop at 00:00");
+    }
+    
     const newClips: Clip[] = [];
     
     for (let i = 0; i < videoAssets.length; i++) {
@@ -649,6 +676,13 @@ export const useVideoHandler = () => {
       if (saveResult.success) {
         console.log("✅ [Video Handler] Multi-asset timeline auto-saved successfully");
         console.log("✅ [Video Handler] Saved under asset path:", saveAssetPath);
+        
+        // 🎬 IMMEDIATE PLAYBACK: Set playhead for seamless playback after multi-drop
+        if (clips.length === 0 && newClips.length > 0 && newClips[0].start === 0) {
+          // First clips starting at 00:00 - set playhead to beginning
+          setCurrentTime(0);
+          console.log("🎬 [Video Handler] Multi-drop starting at 00:00 - playhead set to beginning");
+        }
       } else {
         console.warn("⚠️ [Video Handler] Multi-asset timeline auto-save failed:", saveResult.message);
       }

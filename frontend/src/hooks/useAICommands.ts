@@ -307,20 +307,36 @@ export const useAICommands = () => {
     if (cutOutMatch) {
       console.log("🎬 [AI Commands] OTIO: Detected cut out command, using OTIO timeline system");
       
-              // Use the new OTIO command API v2 for better response handling
-        try {
-          const response = await fetch('/api/command/v2', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              command: command,
-              asset_path: activeVideoAsset?.file_path || 'default',
-              timeline_format: "otio",
-              migration_mode: true
-            })
-          });
+      // ✅ VALIDATION: Ensure we have clips to cut
+      if (clips.length === 0) {
+        toast({
+          title: "No timeline to cut",
+          description: "Please add videos to the timeline before using cut commands",
+          variant: "destructive",
+        });
+        return { success: false, message: "No clips in timeline" };
+      }
+      
+      // ✅ FIX: Convert current clips to OTIO format and send with request
+      try {
+        const { convertClipsToOTIOTimeline } = await import('@/utils/timelineAdapter');
+        const currentTimeline = convertClipsToOTIOTimeline(clips);
+        console.log("🎬 [AI Commands] Converted current timeline to OTIO:", currentTimeline);
+        
+        // Use the new OTIO command API v2 for better response handling
+        const response = await fetch('/api/command/v2', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            command: command,
+            asset_path: activeVideoAsset?.file_path || 'default',
+            timeline_format: "otio",
+            migration_mode: true,
+            current_timeline: currentTimeline  // ✅ KEY FIX: Send current timeline state
+          })
+        });
 
         if (!response.ok) {
           const errorData = await response.json();
@@ -357,9 +373,25 @@ export const useAICommands = () => {
             }
           }
           
+          // 🎯 ENHANCED FEEDBACK: Show LLM parsing confidence and details
+          let enhancedMessage = result.message || "Successfully processed with OTIO timeline system";
+          
+          // Extract confidence and LLM details from logs if available
+          if (result.logs && Array.isArray(result.logs)) {
+            const confidenceLog = result.logs.find(log => log.includes('confidence'));
+            if (confidenceLog) {
+              // Extract confidence percentage for user feedback
+              const confidenceMatch = confidenceLog.match(/(\d+)%/);
+              if (confidenceMatch) {
+                const confidence = confidenceMatch[1];
+                enhancedMessage += ` (AI confidence: ${confidence}%)`;
+              }
+            }
+          }
+          
           toast({
-            title: "Cut out applied with OTIO",
-            description: result.message || "Successfully processed with OTIO timeline system",
+            title: "✨ AI Cut Applied",
+            description: enhancedMessage,
           });
           return { success: true, message: result.message };
         } else {
@@ -367,9 +399,25 @@ export const useAICommands = () => {
         }
       } catch (error) {
         console.error("🎬 [AI Commands] OTIO error:", error);
+        
+        // 🎯 ENHANCED ERROR MESSAGES: Provide specific feedback based on error type
+        let errorTitle = "Cut out failed";
+        let errorDescription = error.message || "Could not apply the cut out command";
+        
+        if (error.message?.includes("Failed to load timeline")) {
+          errorTitle = "Timeline loading failed";
+          errorDescription = "Could not access the current timeline. Try refreshing the page.";
+        } else if (error.message?.includes("confidence")) {
+          errorTitle = "Command not understood";
+          errorDescription = "AI couldn't understand the cut command. Try: 'cut out 10-20' or 'cut out 0:10-0:20'";
+        } else if (error.message?.includes("Invalid range")) {
+          errorTitle = "Invalid time range";
+          errorDescription = "Please check your time format. Example: 'cut out 10-20' or 'cut out 0:10-0:20'";
+        }
+        
         toast({
-          title: "Cut out failed", 
-          description: error.message || "Could not apply the cut out command",
+          title: errorTitle, 
+          description: errorDescription,
           variant: "destructive",
         });
         return { success: false, message: error.message };

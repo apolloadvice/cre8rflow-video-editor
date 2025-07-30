@@ -649,10 +649,29 @@ const ChatPanel = ({ onChatCommand, onVideoProcessed }: ChatPanelProps) => {
       const cutOutMatch = input.match(/cut\s+out\s+(\d{1,2}:\d{2}|\d+)\s*[-–]\s*(\d{1,2}:\d{2}|\d+)/i);
       if (cutOutMatch) {
         debugLog('ChatPanel', 'OTIO: Detected cut out command, using new OTIO timeline system');
-        safeSetStatus("Processing with OTIO timeline system...");
+        
+        // ✅ VALIDATION: Ensure we have clips to cut
+        if (clips.length === 0) {
+          safeSetStatus(null);
+          safeSetIsThinking(false);
+          safeSetMessages((prev) => [...prev, {
+            id: Date.now().toString() + "-assistant",
+            content: "❌ No timeline to cut. Please add videos to the timeline before using cut commands.",
+            sender: "assistant",
+            timestamp: new Date(),
+          }]);
+          return;
+        }
+        
+        safeSetStatus("Converting timeline and processing cut...");
         
         try {
-          debugLog('ChatPanel', 'Using new OTIO command API', { command: input, assetPath });
+          // ✅ FIX: Convert current clips to OTIO format and send with request
+          const { convertClipsToOTIOTimeline } = await import('@/utils/timelineAdapter');
+          const currentTimeline = convertClipsToOTIOTimeline(clips);
+          debugLog('ChatPanel', 'Converted current timeline to OTIO for cut command', currentTimeline);
+          
+          debugLog('ChatPanel', 'Using new OTIO command API', { command: input, assetPath, timelineClips: clips.length });
 
           // Call the new OTIO command API v2 for better response handling
           const response = await fetch('/api/command/v2', {
@@ -664,7 +683,8 @@ const ChatPanel = ({ onChatCommand, onVideoProcessed }: ChatPanelProps) => {
               command: input,
               asset_path: assetPath,
               timeline_format: "otio",
-              migration_mode: true
+              migration_mode: true,
+              current_timeline: currentTimeline  // ✅ KEY FIX: Send current timeline state
             })
           });
 
@@ -747,9 +767,25 @@ const ChatPanel = ({ onChatCommand, onVideoProcessed }: ChatPanelProps) => {
           }
         } catch (otioError) {
           debugLog('ChatPanel', 'OTIO cut operation failed', otioError);
+          
+          // 🎯 ENHANCED ERROR MESSAGES: Provide specific feedback based on error type
+          let errorTitle = "Cut operation failed";
+          let errorMessage = otioError.message || "Could not process the cut command";
+          
+          if (errorMessage.includes("Failed to load timeline")) {
+            errorTitle = "Timeline loading failed";
+            errorMessage = "Could not access the current timeline. The timeline state may not be properly saved.";
+          } else if (errorMessage.includes("confidence")) {
+            errorTitle = "Command not understood";
+            errorMessage = "AI couldn't understand the cut command. Try: 'cut out 10-20' or 'cut out 0:10-0:20'";
+          } else if (errorMessage.includes("Invalid range")) {
+            errorTitle = "Invalid time range";
+            errorMessage = "Please check your time format. Example: 'cut out 10-20' or 'cut out 0:10-0:20'";
+          }
+          
           toast({
-            title: "Cut operation failed",
-            description: otioError.message || "Could not process the cut command",
+            title: errorTitle,
+            description: errorMessage,
             variant: "destructive",
           });
           clearStatusTimers();
@@ -757,7 +793,7 @@ const ChatPanel = ({ onChatCommand, onVideoProcessed }: ChatPanelProps) => {
           safeSetIsThinking(false);
           safeSetMessages((prev) => [...prev, {
             id: Date.now().toString() + "-assistant",
-            content: `❌ Cut operation failed: ${otioError.message || "Unknown error"}`,
+            content: `❌ ${errorTitle}: ${errorMessage}`,
             sender: "assistant",
             timestamp: new Date(),
           }]);
