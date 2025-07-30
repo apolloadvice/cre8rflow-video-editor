@@ -17,8 +17,11 @@ const Playhead: React.FC<PlayheadProps> = ({ timelineRef }) => {
   const updatePlayheadPosition = () => {
     if (!timelineRef.current || duration <= 0) return 0;
     
+    // Clamp currentTime to valid [0, duration] range to prevent cursor from going beyond timeline
+    const clampedCurrentTime = Math.max(0, Math.min(currentTime, duration));
+    
     const timelineWidth = timelineRef.current.clientWidth;
-    const position = (currentTime / duration) * timelineWidth;
+    const position = (clampedCurrentTime / duration) * timelineWidth;
     positionRef.current = position;
     return position;
   };
@@ -35,8 +38,10 @@ const Playhead: React.FC<PlayheadProps> = ({ timelineRef }) => {
       const rect = timelineRef.current.getBoundingClientRect();
       const x = e.clientX - rect.left;
       const newTime = (x / rect.width) * duration;
-      // Allow cursor to reach the end of the timeline duration (which includes the last clip)
-      setCurrentTime(Math.max(0, newTime));
+      
+      // Clamp to valid [0, duration] range to prevent cursor from going beyond timeline boundaries
+      const clampedTime = Math.max(0, Math.min(newTime, duration));
+      setCurrentTime(clampedTime);
     };
     
     const handleMouseUp = () => {

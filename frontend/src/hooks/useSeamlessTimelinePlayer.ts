@@ -34,7 +34,7 @@ interface VideoElement {
 export const useSeamlessTimelinePlayer = (
   containerRef: React.RefObject<HTMLDivElement>
 ) => {
-  const { clips, currentTime, setCurrentTime, duration, setVideoSrc } = useEditorStore();
+  const { clips, currentTime, setCurrentTime, duration, setVideoSrc, setIsPlaying } = useEditorStore();
   
   const [timelineClips, setTimelineClips] = useState<TimelineClip[]>([]);
   const [playbackState, setPlaybackState] = useState<PlaybackState>({
@@ -415,7 +415,18 @@ export const useSeamlessTimelinePlayer = (
           if (currentClip) {
             // ✅ CRITICAL FIX: Account for in_point offset when calculating timeline position
             const timelinePosition = currentClip.start + (video.currentTime - currentClip.in_point);
-            setCurrentTime(timelinePosition);
+            
+            // ✅ NEW FIX: Clamp timeline position to duration boundary
+            const clampedTimelinePosition = Math.min(timelinePosition, duration);
+            setCurrentTime(clampedTimelinePosition);
+            
+            // ✅ NEW FIX: Stop playback if we've reached timeline duration
+            if (timelinePosition >= duration) {
+              console.log(`🏁 [SeamlessPlayer] Timeline position (${timelinePosition.toFixed(2)}s) reached duration (${duration}s), stopping playback`);
+              video.pause();
+              stopPlayback();
+              return;
+            }
             
             // ✅ CRITICAL FIX: Enforce clip boundaries - stop video when clip ends
             const clipEndInVideoTime = currentClip.in_point + currentClip.duration;
@@ -427,7 +438,7 @@ export const useSeamlessTimelinePlayer = (
               if (playbackState.isPlaying) {
                 // Find and switch to next clip
                 const nextClip = findNextClip(currentClip);
-                if (nextClip) {
+                if (nextClip && nextClip.start < duration) {
                   console.log(`🎬 [SeamlessPlayer] Switching from clip "${currentClip.name}" to "${nextClip.name}"`);
                   switchActiveVideo();
                   
@@ -451,8 +462,8 @@ export const useSeamlessTimelinePlayer = (
                     });
                   }
                 } else {
-                  // No more clips, stop playback
-                  console.log('🏁 [SeamlessPlayer] No more clips - stopping playback');
+                  // No more clips or next clip beyond duration, stop playback
+                  console.log('🏁 [SeamlessPlayer] No more clips or reached timeline duration - stopping playback');
                   stopPlayback();
                 }
               }
@@ -522,6 +533,9 @@ export const useSeamlessTimelinePlayer = (
         gapEnd: timelineState.gapEnd
       });
       
+      // ✅ NEW FIX: Sync with editor store to prevent Timeline duration recalculation during gap playback
+      setIsPlaying(true);
+      
       // Start gap progression timer
       startGapProgression(timelineState.gapEnd!);
       
@@ -562,6 +576,9 @@ export const useSeamlessTimelinePlayer = (
           isInGap: false
         });
         
+        // ✅ NEW FIX: Sync with editor store to prevent Timeline duration recalculation during playback
+        setIsPlaying(true);
+        
         // Start playback
         await activeVideoEl.play();
         
@@ -569,6 +586,7 @@ export const useSeamlessTimelinePlayer = (
       } catch (error) {
         console.error('Error starting playback:', error);
         setPlaybackState(prev => ({ ...prev, isPlaying: false }));
+        setIsPlaying(false); // ✅ NEW FIX: Sync with editor store
       }
     } else {
       // Find next clip and jump to it
@@ -589,6 +607,29 @@ export const useSeamlessTimelinePlayer = (
       const elapsed = (Date.now() - playbackState.startTime) / 1000;
       const newTimelineTime = playbackState.timelineStartPosition + elapsed;
       
+      // Check if we've reached the timeline duration boundary
+      if (newTimelineTime >= duration) {
+        console.log(`🏁 [SeamlessPlayer] Gap progression reached timeline duration (${duration}s), stopping playback`);
+        setCurrentTime(duration);
+        
+        // Stop playback at timeline boundary
+        setPlaybackState(prev => ({ ...prev, isPlaying: false }));
+        setIsPlaying(false); // ✅ NEW FIX: Sync with editor store
+        
+        // Pause active video
+        const activeVideoEl = getActiveVideo();
+        if (activeVideoEl) {
+          activeVideoEl.pause();
+        }
+        
+        // Clear animation frame
+        if (animationFrameRef.current) {
+          clearTimeout(animationFrameRef.current);
+          animationFrameRef.current = undefined;
+        }
+        return;
+      }
+      
       if (newTimelineTime >= gapEndTime) {
         // Gap ended, find next clip and resume playback
         console.log(`⏭️ [SeamlessPlayer] Gap ended at ${gapEndTime.toFixed(2)}s, seeking next clip`);
@@ -607,7 +648,10 @@ export const useSeamlessTimelinePlayer = (
             setTimeout(() => startPlayback(), 50);
           } else {
             // No more clips, stop playback by setting state
+            console.log(`🏁 [SeamlessPlayer] No more clips after gap, stopping at timeline duration`);
+            setCurrentTime(Math.min(newTimelineTime, duration));
             setPlaybackState(prev => ({ ...prev, isPlaying: false }));
+            setIsPlaying(false); // ✅ NEW FIX: Sync with editor store
             
             // Pause active video
             const activeVideoEl = getActiveVideo();
@@ -623,15 +667,36 @@ export const useSeamlessTimelinePlayer = (
           }
         }
       } else {
-        // Continue gap progression
-        setCurrentTime(newTimelineTime);
-        animationFrameRef.current = setTimeout(progressGap, 50) as any;
+        // Continue gap progression, but clamp to duration boundary
+        const clampedTime = Math.min(newTimelineTime, duration);
+        setCurrentTime(clampedTime);
+        
+        // If we've reached duration boundary, stop
+        if (clampedTime >= duration) {
+          console.log(`🏁 [SeamlessPlayer] Gap progression reached timeline duration boundary, stopping playback`);
+          setPlaybackState(prev => ({ ...prev, isPlaying: false }));
+          setIsPlaying(false); // ✅ NEW FIX: Sync with editor store
+          
+          // Pause active video
+          const activeVideoEl = getActiveVideo();
+          if (activeVideoEl) {
+            activeVideoEl.pause();
+          }
+          
+          // Clear animation frame
+          if (animationFrameRef.current) {
+            clearTimeout(animationFrameRef.current);
+            animationFrameRef.current = undefined;
+          }
+        } else {
+          animationFrameRef.current = setTimeout(progressGap, 50) as any;
+        }
       }
     };
     
     // Start gap progression
     animationFrameRef.current = setTimeout(progressGap, 50) as any;
-  }, [playbackState, setCurrentTime, findClipAtTimeWithGaps, timelineClips, getActiveVideo]);
+  }, [playbackState, setCurrentTime, findClipAtTimeWithGaps, timelineClips, getActiveVideo, duration]);
 
   // Stop timeline playback
   const stopPlayback = useCallback(() => {
@@ -650,7 +715,10 @@ export const useSeamlessTimelinePlayer = (
       ...prev,
       isPlaying: false
     }));
-  }, []);
+    
+    // ✅ NEW FIX: Sync with editor store to allow Timeline duration recalculation after playback stops
+    setIsPlaying(false);
+  }, [setIsPlaying]);
 
   // Toggle playback
   const togglePlayback = useCallback(() => {

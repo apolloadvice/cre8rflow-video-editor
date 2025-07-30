@@ -518,8 +518,16 @@ const Timeline = forwardRef<HTMLDivElement, TimelineProps>(({
   // Add effect to force duration recalculation when clips change - debounced to prevent excessive calls
   const debouncedRecalculateDuration = useCallback(
     debounce(() => {
-      const currentClips = useEditorStore.getState().clips;
-      const currentDuration = useEditorStore.getState().duration;
+      const currentState = useEditorStore.getState();
+      const currentClips = currentState.clips;
+      const currentDuration = currentState.duration;
+      const isCurrentlyPlaying = currentState.isPlaying;
+      
+      // Skip expensive duration recalculation during playback to prevent visual glitches
+      if (isCurrentlyPlaying) {
+        console.log("🎬 [Timeline] Skipping duration recalculation during playback to prevent glitches");
+        return;
+      }
       
       if (currentClips.length > 0) {
         const maxEnd = Math.max(...currentClips.map(clip => clip.end));
@@ -695,12 +703,26 @@ const Timeline = forwardRef<HTMLDivElement, TimelineProps>(({
   
   useEffect(() => {
     if (isAutoZoom && clips.length > 0) {
+      // Skip auto-zoom calculations during playback to prevent visual glitches
+      const currentState = useEditorStore.getState();
+      if (currentState.isPlaying) {
+        console.log("🔍 [Timeline] Skipping auto-zoom during playback to prevent visual glitches");
+        return;
+      }
+      
       // Clear previous timeout
       if (autoZoomTimeoutRef.current) {
         clearTimeout(autoZoomTimeoutRef.current);
       }
       
       autoZoomTimeoutRef.current = setTimeout(() => {
+        // Double-check playback state before applying zoom changes
+        const stateAtTimeout = useEditorStore.getState();
+        if (stateAtTimeout.isPlaying) {
+          console.log("🔍 [Timeline] Playback started during zoom timeout, skipping zoom update");
+          return;
+        }
+        
         // Use ref to get current values to avoid stale closures
         const currentZoom = persistence.zoom;
         const optimalZoom = calculateOptimalZoom();
@@ -838,6 +860,13 @@ const Timeline = forwardRef<HTMLDivElement, TimelineProps>(({
   // Debounced function to handle thumbnail updates on zoom changes
   const debouncedThumbnailUpdate = useCallback(
     debounce((newZoom) => {
+      // Skip thumbnail updates during playback to prevent visual glitches
+      const currentState = useEditorStore.getState();
+      if (currentState.isPlaying) {
+        console.log("🖼️ [Timeline] Skipping thumbnail update during playback to prevent glitches");
+        return;
+      }
+      
       // This would trigger a re-fetch of thumbnails at appropriate resolution
       console.log("Updating thumbnails for zoom level:", newZoom);
     }, 300),

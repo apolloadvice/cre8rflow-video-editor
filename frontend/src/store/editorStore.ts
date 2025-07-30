@@ -616,6 +616,13 @@ export const useEditorStore = create<EditorStore>()(
         // Set updating flag and clips
         set({ clips, _isUpdatingClips: true });
         
+        // Force immediate duration recalculation for UI consistency after clip operations
+        const currentState = get();
+        if (!currentState.isPlaying) {
+          console.log("🎬 [Store] Force immediate duration recalculation after setClips");
+          currentState.recalculateDuration();
+        }
+        
         // Use timeout to defer operations and prevent immediate re-entry
         setTimeout(() => {
           try {
@@ -623,7 +630,7 @@ export const useEditorStore = create<EditorStore>()(
             if (state._isUpdatingClips) {
               // Skip expensive operations during active playback to prevent visual glitches
               if (!state.isPlaying) {
-                state.recalculateDuration();
+                // Duration already recalculated above for UI consistency, just push to history
                 state.pushToHistory();
                 
                 // Dev-only validation for seamless player requirements
@@ -703,7 +710,12 @@ export const useEditorStore = create<EditorStore>()(
       },
       
       setCurrentTime: (time, isPlaybackUpdate = false) => {
-        set({ currentTime: time });
+        const { duration } = get();
+        
+        // Clamp currentTime to valid [0, duration] range to prevent timeline issues
+        const clampedTime = Math.max(0, Math.min(time, duration));
+        
+        set({ currentTime: clampedTime });
         
         // Skip expensive operations during active playback to prevent visual glitches
         if (isPlaybackUpdate && get().isPlaying) {
@@ -899,8 +911,8 @@ export const useEditorStore = create<EditorStore>()(
         console.log('🎬 [Store] recalculateDuration called with clips:', clips);
         
         if (clips.length === 0) {
-          console.log('🎬 [Store] No clips, setting duration to 0');
-          set({ duration: 0 });
+          console.log('🎬 [Store] No clips, setting duration to minimum for empty timeline');
+          set({ duration: 30 }); // Minimum duration only for empty timelines for better UX
           return;
         }
         
@@ -915,8 +927,9 @@ export const useEditorStore = create<EditorStore>()(
         // Calculate what the duration would be if clips were sequential
         const totalSequentialDuration = clips.reduce((total, clip) => total + (clip.end - clip.start), 0);
         
-        // Set a minimum duration for better UX (at least 30 seconds if there are clips)
-        const newDuration = Math.max(maxEnd, 30);
+        // Use the actual maximum end time as duration to respect cuts and edits
+        // This allows timelines to be shorter than 30 seconds after cuts
+        const newDuration = maxEnd;
         
         console.log('🎬 [Store] Duration calculation:', {
           maxEnd,
