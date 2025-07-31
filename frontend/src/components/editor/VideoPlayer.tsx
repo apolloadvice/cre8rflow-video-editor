@@ -136,9 +136,9 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(({
           await toggleGESPlayback();
           if (useSeamlessMode) {
             stopSeamlessPlayback();
-          } else {
-            stopTimelinePlayback();
           }
+          // ✅ FIX: Don't call stopTimelinePlayback() in GES mode - it interferes with cursor position
+          // The seamless player properly maintains cursor position when stopping
         } else {
           console.log(`🎮 [VideoPlayer] Starting hybrid playback - GES timeline sync + seamless video`);
           await toggleGESPlayback();

@@ -555,17 +555,35 @@ export const useEditorStore = create<EditorStore>()(
       
       // Internal state flags
       _isUpdatingClips: false,
+      _setClipsInProgress: false, // ✅ FIX: Prevent concurrent setClips operations
       
       // Actions
       setClips: (clips) => {
         console.log("🎬 [Store] setClips called with:", clips);
         console.log("🎬 [Store] setClips count:", clips.length);
         
+        // ✅ FIX: Prevent concurrent setClips operations that could cause duration reversion
+        const state = get();
+        if (state._setClipsInProgress) {
+          console.log("🎬 [Store] setClips already in progress, queueing update");
+          // Queue the update to run after current operation completes
+          setTimeout(() => {
+            if (!get()._setClipsInProgress) {
+              get().setClips(clips);
+            }
+          }, 50);
+          return;
+        }
+        
+        // Mark operation in progress
+        set({ _setClipsInProgress: true });
+        
         const currentClips = get().clips;
         
         // Enhanced change detection to prevent infinite loops
         if (currentClips === clips) {
           console.log("🎬 [Store] setClips skipped - same reference");
+          set({ _setClipsInProgress: false }); // ✅ FIX: Clear progress flag
           return;
         }
         
@@ -603,6 +621,7 @@ export const useEditorStore = create<EditorStore>()(
 
         if (!hasChanges) {
           console.log("🎬 [Store] setClips skipped - no meaningful changes detected");
+          set({ _setClipsInProgress: false }); // ✅ FIX: Clear progress flag
           return;
         }
         
@@ -610,6 +629,7 @@ export const useEditorStore = create<EditorStore>()(
         const isUpdating = get()._isUpdatingClips;
         if (isUpdating) {
           console.log("🎬 [Store] setClips skipped - already updating");
+          set({ _setClipsInProgress: false }); // ✅ FIX: Clear progress flag
           return;
         }
         
@@ -628,20 +648,26 @@ export const useEditorStore = create<EditorStore>()(
           try {
             const state = get();
             if (state._isUpdatingClips) {
-              // Skip expensive operations during active playback to prevent visual glitches
+              // ✅ FIX: Add additional playback guard for deferred operations
               if (!state.isPlaying) {
                 // Duration already recalculated above for UI consistency, just push to history
                 state.pushToHistory();
                 
+                // ✅ FIX: Use current state clips instead of closure parameter to prevent stale data issues
+                const currentClips = state.clips;
+                console.log("🎬 [Store] Running deferred validation with current clips count:", currentClips.length);
+                
                 // Dev-only validation for seamless player requirements
-                assertSeamlessClips(clips);
+                assertSeamlessClips(currentClips);
+              } else {
+                console.log("🎬 [Store] Skipping deferred operations during active playback to prevent duration reversion");
               }
               
-              set({ _isUpdatingClips: false });
+              set({ _isUpdatingClips: false, _setClipsInProgress: false }); // ✅ FIX: Clear both flags
             }
           } catch (error) {
             console.error("🎬 [Store] Error in deferred operations:", error);
-            set({ _isUpdatingClips: false });
+            set({ _isUpdatingClips: false, _setClipsInProgress: false }); // ✅ FIX: Clear both flags on error
           }
         }, 10);
       },
@@ -710,24 +736,81 @@ export const useEditorStore = create<EditorStore>()(
       },
       
       setCurrentTime: (time, isPlaybackUpdate = false) => {
-        const { duration } = get();
+        const { duration, isPlaying } = get();
+        
+        // 🔍 DEBUG: Track cursor position changes to find 00:00 reset source
+        console.log(`🔍 [Store] setCurrentTime called:`, {
+          requestedTime: time,
+          currentDuration: duration,
+          isPlaybackUpdate,
+          isPlaying,
+          stackTrace: new Error().stack?.split('\n').slice(1, 4).join('\n')
+        });
         
         // Clamp currentTime to valid [0, duration] range to prevent timeline issues
         const clampedTime = Math.max(0, Math.min(time, duration));
         
+        // 🔍 DEBUG: Track if clamping is causing the reset to 0
+        if (time !== clampedTime) {
+          console.warn(`🔍 [Store] setCurrentTime clamped: ${time} → ${clampedTime} (duration: ${duration})`);
+        }
+        
+        // 🔍 DEBUG: Special alert for cursor reset to 0
+        if (clampedTime === 0 && time > 0) {
+          console.error(`🚨 [Store] CURSOR RESET TO 0! Original time: ${time}, Duration: ${duration}`);
+          console.error(`🚨 [Store] Stack trace:`, new Error().stack);
+        }
+        
         set({ currentTime: clampedTime });
         
         // Skip expensive operations during active playback to prevent visual glitches
-        if (isPlaybackUpdate && get().isPlaying) {
+        if (isPlaybackUpdate && isPlaying) {
           return; // Just update time, skip validation and history during playback
         }
       },
       
       setDuration: (duration) => {
+        const currentDuration = get().duration;
+        const isPlaying = get().isPlaying;
+        
+        // ✅ FIX: Add enhanced debugging for duration changes during playback
+        if (Math.abs(currentDuration - duration) > 0.01) { // 10ms tolerance
+          console.log("🎬 [Store] ⚠️ DURATION CHANGE in setDuration:", {
+            from: currentDuration,
+            to: duration,
+            difference: duration - currentDuration,
+            isPlaying,
+            isDuringPlayback: isPlaying,
+            isReversion: duration > currentDuration && currentDuration < 30,
+            stackTrace: new Error().stack?.split('\n').slice(0, 8)
+          });
+          
+          // Flag potential reversion issues
+          if (isPlaying && duration > currentDuration && currentDuration < 30) {
+            console.error("🚨 [Store] DURATION REVERSION DETECTED DURING PLAYBACK!", {
+              revertedFrom: currentDuration,
+              revertedTo: duration,
+              playbackState: isPlaying
+            });
+          }
+        }
+        
         set({ duration });
       },
       
       setIsPlaying: (playing) => {
+        const wasPlaying = get().isPlaying;
+        
+        // ✅ FIX: Add debugging for playback state changes
+        if (wasPlaying !== playing) {
+          console.log("🎬 [Store] Playback state change:", {
+            from: wasPlaying,
+            to: playing,
+            currentDuration: get().duration,
+            clipCount: get().clips.length
+          });
+        }
+        
         set({ isPlaying: playing });
       },
       
@@ -907,8 +990,14 @@ export const useEditorStore = create<EditorStore>()(
       
       // Computed functions
       recalculateDuration: () => {
-        const { clips } = get();
+        const { clips, isPlaying } = get();
         console.log('🎬 [Store] recalculateDuration called with clips:', clips);
+        
+        // ✅ FIX: Skip duration recalculation during active playback to prevent duration reversion
+        if (isPlaying) {
+          console.log('🎬 [Store] Skipping duration recalculation during active playback to prevent reversion');
+          return;
+        }
         
         if (clips.length === 0) {
           console.log('🎬 [Store] No clips, setting duration to minimum for empty timeline');
@@ -931,10 +1020,16 @@ export const useEditorStore = create<EditorStore>()(
         // This allows timelines to be shorter than 30 seconds after cuts
         const newDuration = maxEnd;
         
+        // ✅ FIX: Add debugging to track duration changes and detect reversion issues
+        const currentDuration = get().duration;
+        const durationChanged = Math.abs(currentDuration - newDuration) > 0.01; // 10ms tolerance
+        
         console.log('🎬 [Store] Duration calculation:', {
+          previousDuration: currentDuration,
           maxEnd,
           totalSequentialDuration,
           newDuration,
+          durationChanged,
           clipCount: clips.length,
           clipEndTimes: clips.map(c => ({ id: c.id, name: c.name, end: c.end })),
           allClipPositions: clips.map(c => ({ 
@@ -945,6 +1040,16 @@ export const useEditorStore = create<EditorStore>()(
             duration: c.end - c.start 
           }))
         });
+        
+        if (durationChanged) {
+          console.log('🎬 [Store] ⚠️ DURATION CHANGE DETECTED:', {
+            from: currentDuration,
+            to: newDuration,
+            difference: newDuration - currentDuration,
+            isReversion: newDuration > currentDuration && currentDuration < 30,
+            stackTrace: new Error().stack?.split('\\n').slice(0, 5)
+          });
+        }
         
         console.log('🎬 [Store] Expected vs Actual:', {
           expected: 'Sequential clips should have total duration = sum of individual durations',

@@ -245,7 +245,9 @@ export const useGESPlayer = () => {
     playbackStartTimeRef.current = Date.now();
     const startPosition = currentTime;
     
-    console.log(`🎬 [GES] Starting timeline sync from position ${startPosition}s`);
+    // 🔍 DEBUG: Track timeline sync start
+    console.log(`🔍 [GES] Starting timeline sync from position ${startPosition}s`);
+    console.log(`🔍 [GES] Timeline sync captured currentTime: ${currentTime}s, duration: ${playerState.duration}s`);
     
     timelineSyncRef.current = window.setInterval(() => {
       const elapsed = (Date.now() - playbackStartTimeRef.current) / 1000;
@@ -265,6 +267,10 @@ export const useGESPlayer = () => {
           setPlayerState(prev => ({ ...prev, isPlaying: false }));
         }).catch(console.warn);
       } else {
+        // 🔍 DEBUG: Track every timeline sync update (only occasionally to avoid spam)
+        if (Math.floor(newPosition * 10) % 10 === 0) { // Log every 100ms
+          console.log(`🔍 [GES] Timeline sync update: ${newPosition.toFixed(2)}s`);
+        }
         setCurrentTime(newPosition);
       }
     }, 50); // Update every 50ms for smooth cursor movement
@@ -303,12 +309,17 @@ export const useGESPlayer = () => {
   // Stop preview server
   const stopPreview = useCallback(async (): Promise<boolean> => {
     try {
+      // 🔍 DEBUG: Track pause operation sequence
+      console.log(`🔍 [GES] stopPreview called - current timeline position: ${currentTime}s`);
+      
       const response = await gesApiRequest('/ges/stop-preview', 'POST');
       
       if (response.success) {
         // Stop timeline sync first
+        console.log(`🔍 [GES] Stopping timeline sync...`);
         stopTimelineSync();
         
+        console.log(`🔍 [GES] Setting player state to not playing - timeline position should remain: ${currentTime}s`);
         setPlayerState(prev => ({
           ...prev,
           isPlaying: false
@@ -323,7 +334,7 @@ export const useGESPlayer = () => {
       console.error('🎬 [GES] Failed to stop preview:', error);
       return false;
     }
-  }, [gesApiRequest, stopTimelineSync]);
+  }, [gesApiRequest, stopTimelineSync, currentTime]);
 
   // Seek to position
   const seekToPosition = useCallback(async (position: number): Promise<boolean> => {
@@ -391,7 +402,34 @@ export const useGESPlayer = () => {
         }));
         
         if (timeline_duration) {
-          setDuration(timeline_duration);
+          // ✅ FIX: Prevent GES status from overriding correct frontend duration after cuts
+          const clipCount = clips.length;
+          
+          // Calculate expected duration from current clips to validate GES duration
+          const expectedDuration = clips.length > 0 ? Math.max(...clips.map(clip => clip.end)) : 0;
+          
+          const durationDifference = Math.abs(timeline_duration - expectedDuration);
+          const isSignificantDifference = durationDifference > 1.0; // 1 second tolerance
+          
+          console.log(`🎬 [GES] Duration validation:`, {
+            gesDuration: timeline_duration,
+            frontendDuration: duration,
+            expectedFromClips: expectedDuration,
+            difference: durationDifference,
+            isSignificant: isSignificantDifference,
+            clipCount,
+            isPlaybackActive: playerState.isPlaying
+          });
+          
+          // Only update duration if:
+          // 1. Not during active playback (to prevent reversion), OR
+          // 2. GES duration matches expected frontend duration (within tolerance)
+          if (!playerState.isPlaying || !isSignificantDifference) {
+            setDuration(timeline_duration);
+            console.log(`🎬 [GES] Updated duration to ${timeline_duration}s`);
+          } else {
+            console.log(`🎬 [GES] ⚠️ Skipped duration update during playback - GES (${timeline_duration}s) differs significantly from expected (${expectedDuration}s)`);
+          }
         }
       }
     } catch (error) {
@@ -409,14 +447,18 @@ export const useGESPlayer = () => {
 
   // Toggle playback with timeline sync
   const togglePlayback = useCallback(async (): Promise<boolean> => {
+    // 🔍 DEBUG: Track toggle playback operation
+    console.log(`🔍 [GES] togglePlayback called - isPlaying: ${playerState.isPlaying}, currentTime: ${currentTime}s`);
+    
     if (playerState.isPlaying) {
+      console.log(`🔍 [GES] Pausing playback - timeline position should preserve: ${currentTime}s`);
       const stopped = await stopPreview();
-      if (stopped) {
-        // Reset timeline position for next play
-        setCurrentTime(0);
-      }
+      console.log(`🔍 [GES] Pause completed - stopPreview result: ${stopped}, timeline position should still be: ${currentTime}s`);
+      // ✅ FIX: Don't reset timeline position on pause - keep current position for seamless resume
+      // Removed setCurrentTime(0) to prevent red cursor from snapping back to 00:00
       return stopped;
     } else {
+      console.log(`🔍 [GES] Starting playback from position: ${currentTime}s`);
       // Ensure timeline exists first
       if (!playerState.hasTimeline) {
         const created = await createTimeline();
@@ -426,16 +468,18 @@ export const useGESPlayer = () => {
       const started = await startPreview();
       if (started) {
         // Start timeline progress simulation
+        console.log(`🔍 [GES] Starting timeline sync from current position: ${currentTime}s`);
         startTimelineSync();
       }
       return started;
     }
-  }, [playerState.isPlaying, playerState.hasTimeline, stopPreview, startPreview, createTimeline, setCurrentTime, startTimelineSync]);
+  }, [playerState.isPlaying, playerState.hasTimeline, stopPreview, startPreview, createTimeline, currentTime, startTimelineSync]);
 
   // Initialize GES timeline when clips change
   useEffect(() => {
-    if (clips.length > 0 && !isInitialized.current) {
-      console.log('🎬 [GES] Initializing timeline with clips');
+    if (clips.length > 0) {
+      // ✅ FIX: Always recreate timeline when clips change to sync with cut operations
+      console.log('🎬 [GES] Creating/updating timeline with clips (clip count changed or timeline needs sync)');
       createTimeline();
       isInitialized.current = true;
     } else if (clips.length === 0 && isInitialized.current) {

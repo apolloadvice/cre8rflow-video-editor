@@ -166,7 +166,24 @@ export const useSeamlessTimelinePlayer = (
       in_point: c.in_point
     })));
     
-    setTimelineClips(mappedClips);
+    // ✅ FIX: Only update timeline clips if they've actually changed to prevent unnecessary store updates
+    const hasClipsChanged = timelineClips.length !== mappedClips.length || 
+      mappedClips.some((newClip, index) => {
+        const oldClip = timelineClips[index];
+        return !oldClip || 
+          oldClip.id !== newClip.id ||
+          oldClip.start !== newClip.start ||
+          oldClip.end !== newClip.end ||
+          oldClip.in_point !== newClip.in_point ||
+          oldClip.signedUrl !== newClip.signedUrl;
+      });
+    
+    if (hasClipsChanged) {
+      console.log('🔧 [SeamlessPlayer] Timeline clips changed, updating state');
+      setTimelineClips(mappedClips);
+    } else {
+      console.log('🔧 [SeamlessPlayer] Timeline clips unchanged, skipping state update to prevent duration reversion');
+    }
     
     // Preload the first video for immediate playback
     if (mappedClips.length > 0 && mappedClips[0].signedUrl && videoARef.current) {
@@ -700,7 +717,8 @@ export const useSeamlessTimelinePlayer = (
 
   // Stop timeline playback
   const stopPlayback = useCallback(() => {
-    console.log(`⏸️ [SeamlessPlayer] Stopping playback`);
+    // 🔍 DEBUG: Track seamless player stop
+    console.log(`🔍 [SeamlessPlayer] Stopping playback - current timeline position: ${currentTime}s`);
     
     if (animationFrameRef.current) {
       clearTimeout(animationFrameRef.current);
@@ -711,14 +729,16 @@ export const useSeamlessTimelinePlayer = (
     if (videoARef.current) videoARef.current.pause();
     if (videoBRef.current) videoBRef.current.pause();
 
+    console.log(`🔍 [SeamlessPlayer] Setting playback state to false - timeline position should remain: ${currentTime}s`);
     setPlaybackState(prev => ({
       ...prev,
       isPlaying: false
     }));
     
     // ✅ NEW FIX: Sync with editor store to allow Timeline duration recalculation after playback stops
+    console.log(`🔍 [SeamlessPlayer] Syncing with editor store - setIsPlaying(false)`);
     setIsPlaying(false);
-  }, [setIsPlaying]);
+  }, [setIsPlaying, currentTime]);
 
   // Toggle playback
   const togglePlayback = useCallback(() => {
@@ -763,6 +783,12 @@ export const useSeamlessTimelinePlayer = (
 
   // Reset video elements and preload URLs when clips change
   useEffect(() => {
+    // ✅ FIX: Skip clip reprocessing during active playback to prevent duration reversion
+    if (playbackState.isPlaying) {
+      console.log('🔧 [SeamlessPlayer] Skipping clip reprocessing during active playback to prevent duration reversion');
+      return;
+    }
+    
     if (clips.length > 0) {
       console.log('🔧 [SeamlessPlayer] Clips changed, resetting video elements and preloading URLs with new clips:', clips.map(c => ({
         name: c.name,
@@ -790,7 +816,7 @@ export const useSeamlessTimelinePlayer = (
         console.error('🚀 [SeamlessPlayer] Error preloading clip URLs:', error);
       });
     }
-  }, [clips, preloadClipUrls]);
+  }, [clips, preloadClipUrls]); // ✅ FIX: Removed playbackState.isPlaying to prevent reset during pause
 
   // Cleanup on unmount
   useEffect(() => {
