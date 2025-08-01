@@ -663,7 +663,7 @@ async def handle_cut_out_command(adapter: TimelineAdapter, command: str, asset_p
         frame_rate = int(adapter.fps) if adapter.fps else 30
         operation = cut_handler.parse(command, frame_rate=frame_rate)
         
-        if operation.type_ == "UNKNOWN":
+        if operation.type == "UNKNOWN":
             error_msg = operation.parameters.get("error", "Unknown parsing error")
             return {
                 "applied": False,

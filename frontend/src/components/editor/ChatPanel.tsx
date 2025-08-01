@@ -602,6 +602,68 @@ const ChatPanel = ({ onChatCommand, onVideoProcessed }: ChatPanelProps) => {
     return animationId;
   };
 
+  // LLM-based command interpretation for handling typos and synonyms
+  const interpretCommandWithLLM = async (command: string, assetPath: string) => {
+    try {
+      safeSetStatus("Understanding your command...");
+      const { parsed, error } = await parseCommand(command, assetPath);
+      
+      if (error) {
+        // Return exact error from backend
+        debugLog('ChatPanel', 'LLM interpretation failed with error', error);
+        return { 
+          isCutOutCommand: false, 
+          error: error,
+          fallbackToRegex: true 
+        };
+      }
+      
+      if (!parsed || parsed.intent !== 'cut_out' || parsed.confidence < 0.7) {
+        const reason = parsed ? 
+          `Low confidence (${parsed.confidence || 0}) or non-cut_out intent (${parsed.intent || 'unknown'})` :
+          'No parsed result from LLM';
+        
+        debugLog('ChatPanel', 'LLM interpretation unsuccessful', { 
+          command, 
+          parsed, 
+          reason 
+        });
+        
+        return { 
+          isCutOutCommand: false, 
+          reason: reason,
+          fallbackToRegex: true 
+        };
+      }
+      
+      debugLog('ChatPanel', 'LLM successfully detected cut_out command', { 
+        original: command, 
+        confidence: parsed.confidence,
+        timeRange: `${parsed.start_time}-${parsed.end_time}`,
+        intent: parsed.intent,
+        normalizedCommand: `cut out ${parsed.start_time} - ${parsed.end_time}`
+      });
+      
+      return {
+        isCutOutCommand: true,
+        startTime: parsed.start_time,
+        endTime: parsed.end_time,
+        confidence: parsed.confidence,
+        normalizedCommand: `cut out ${parsed.start_time} - ${parsed.end_time}`,
+        originalCommand: command
+      };
+      
+    } catch (networkError) {
+      // Catch network/API errors with exact message
+      debugLog('ChatPanel', 'LLM API call failed', networkError);
+      return { 
+        isCutOutCommand: false, 
+        error: `LLM API Error: ${networkError.message}`,
+        fallbackToRegex: true 
+      };
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     debugLog('ChatPanel', 'handleSubmit started', { input, isMounted: isMountedRef.current });
@@ -645,10 +707,155 @@ const ChatPanel = ({ onChatCommand, onVideoProcessed }: ChatPanelProps) => {
     try {
       debugLog('ChatPanel', 'Starting command parsing', { input, assetPath });
 
-      // OTIO SYSTEM: Detect "cut out" commands and use new OTIO timeline API
+      // NEW: Step 1 - LLM Command Interpretation with unlimited flexibility
+      safeSetStatus("Reading your instructions…");
+      const llmResult = await interpretCommandWithLLM(input, assetPath);
+
+      // Handle LLM errors with exact error messages (silent to user)
+      if (llmResult.error) {
+        debugLog('ChatPanel', 'LLM failed, continuing to regex fallback', llmResult.error);
+        console.warn(`🤖 LLM interpretation failed: ${llmResult.error}`);
+      } else if (llmResult.reason) {
+        debugLog('ChatPanel', 'LLM did not detect cut_out intent', llmResult.reason);
+        console.info(`🤖 LLM interpretation: ${llmResult.reason}`);
+      }
+
+      if (llmResult.isCutOutCommand) {
+        debugLog('ChatPanel', 'LLM successfully interpreted cut command, using OTIO system', {
+          originalCommand: llmResult.originalCommand,
+          normalizedCommand: llmResult.normalizedCommand,
+          confidence: llmResult.confidence
+        });
+        
+        // Use normalized command for OTIO processing
+        const normalizedInput = llmResult.normalizedCommand;
+        
+        // Continue with existing OTIO detection using normalized command
+        const cutOutMatch = normalizedInput.match(/cut\s+out\s+(\d{1,2}:\d{2}|\d+)\s*[-–]\s*(\d{1,2}:\d{2}|\d+)/i);
+        if (cutOutMatch) {
+          debugLog('ChatPanel', 'OTIO: Detected cut out command via LLM normalization');
+          
+          // ✅ VALIDATION: Ensure we have clips to cut
+          if (clips.length === 0) {
+            safeSetStatus(null);
+            safeSetIsThinking(false);
+            safeSetMessages((prev) => [...prev, {
+              id: Date.now().toString() + "-assistant",
+              content: "❌ No timeline to cut. Please add videos to the timeline before using cut commands.",
+              sender: "assistant",
+              timestamp: new Date(),
+            }]);
+            return;
+          }
+          
+          // Update status to show LLM successfully processed the command
+          const confidenceText = llmResult.confidence >= 0.9 ? "clearly understood" : 
+                                 llmResult.confidence >= 0.8 ? "understood" : "interpreted";
+          safeSetStatus(`I ${confidenceText} your command. Converting timeline and processing cut...`);
+          
+          try {
+            // ✅ FIX: Convert current clips to OTIO format and send with request
+            const { convertClipsToOTIOTimeline } = await import('@/utils/timelineAdapter');
+            const currentTimeline = convertClipsToOTIOTimeline(clips);
+            debugLog('ChatPanel', 'Converted current timeline to OTIO for LLM-interpreted cut command', currentTimeline);
+            
+            // Call the OTIO command API v2 with the normalized command
+            const response = await fetch('/api/command/v2', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                command: normalizedInput, // Use LLM-normalized command
+                asset_path: assetPath,
+                timeline_format: "otio",
+                migration_mode: true,
+                current_timeline: currentTimeline
+              })
+            });
+
+            if (!response.ok) {
+              const errorData = await response.json();
+              throw new Error(errorData.message || 'OTIO command failed');
+            }
+
+            const otioResult = await response.json();
+            debugLog('ChatPanel', 'OTIO command result for LLM-interpreted command', otioResult);
+
+            if (otioResult.status === 'success' || otioResult.status === 'ok') {
+              // Success - update timeline and show enhanced success message
+              if (otioResult.timeline) {
+                try {
+                  const { TimelineAdapter } = await import('@/utils/timelineAdapter');
+                  const adapter = new TimelineAdapter(otioResult.timeline);
+                  const updatedClips = adapter.getClipsForAPI();
+                  
+                  setClips(updatedClips);
+                  
+                  // Force refresh
+                  setTimeout(() => {
+                    const { recalculateDuration } = useEditorStore.getState();
+                    recalculateDuration();
+                  }, 100);
+                  
+                } catch (conversionError) {
+                  console.error('Failed to convert OTIO timeline to frontend format:', conversionError);
+                }
+              }
+              
+              clearStatusTimers();
+              safeSetStatus(null);
+              toast({
+                title: "Cut operation successful",
+                description: `Processed "${llmResult.originalCommand}" with ${(llmResult.confidence * 100).toFixed(0)}% confidence`,
+              });
+              safeSetIsThinking(false);
+              
+              // Enhanced success message showing LLM understanding
+              const successMessage = llmResult.confidence >= 0.9 ? 
+                `✅ Perfect! I understood "${llmResult.originalCommand}" and successfully cut out ${llmResult.startTime}s-${llmResult.endTime}s using the OTIO timeline system.` :
+                `✅ Got it! I interpreted "${llmResult.originalCommand}" as a cut command and successfully removed ${llmResult.startTime}s-${llmResult.endTime}s from your timeline.`;
+              
+              safeSetMessages((prev) => [...prev, {
+                id: Date.now().toString() + "-assistant",
+                content: successMessage,
+                sender: "assistant",
+                timestamp: new Date(),
+              }]);
+              
+              return; // Exit after successful LLM-triggered OTIO processing
+              
+            } else {
+              throw new Error(otioResult.message || 'OTIO operation failed');
+            }
+          } catch (otioError) {
+            debugLog('ChatPanel', 'OTIO cut operation failed for LLM command', otioError);
+            
+            // Enhanced error messages
+            let errorTitle = "Cut operation failed";
+            let errorMessage = otioError.message || "Could not process the cut command";
+            
+            toast({
+              title: errorTitle,
+              description: errorMessage,
+              variant: "destructive",
+            });
+            clearStatusTimers();
+            safeSetStatus(null);
+            safeSetIsThinking(false);
+            safeSetMessages((prev) => [...prev, {
+              id: Date.now().toString() + "-assistant",
+              content: `❌ ${errorTitle}: ${errorMessage}`,
+              sender: "assistant",
+              timestamp: new Date(),
+            }]);
+            return;
+          }
+        }
+      }
+
+      // EXISTING: Original regex detection as fallback (unchanged)
       const cutOutMatch = input.match(/cut\s+out\s+(\d{1,2}:\d{2}|\d+)\s*[-–]\s*(\d{1,2}:\d{2}|\d+)/i);
       if (cutOutMatch) {
-        debugLog('ChatPanel', 'OTIO: Detected cut out command, using new OTIO timeline system');
+        debugLog('ChatPanel', 'OTIO: Detected cut out command via regex fallback');
         
         // ✅ VALIDATION: Ensure we have clips to cut
         if (clips.length === 0) {
