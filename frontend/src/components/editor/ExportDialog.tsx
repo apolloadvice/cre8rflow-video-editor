@@ -41,6 +41,7 @@ import {
   cancelExportJob,
   downloadExport 
 } from '@/api/apiClient';
+import { useExportIntervalTree, serializeExportIntervals, debugExportIntervals } from '@/hooks/useExportIntervalTree';
 
 interface ExportDialogProps {
   isOpen: boolean;
@@ -83,6 +84,9 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
   const [exportJobs, setExportJobs] = useState<ExportJob[]>([]);
   const [isExporting, setIsExporting] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
+  
+  // NEW: Export interval tree for frame-accurate exports
+  const exportTree = useExportIntervalTree();
 
   // Load export profiles
   useEffect(() => {
@@ -141,10 +145,30 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
       return;
     }
 
+    // NEW: Build export intervals for frame-accurate processing
+    const exportIntervals = exportTree.buildExportIntervals();
+    const exportSummary = exportTree.getExportSummary();
+    
+    // Validate export content
+    if (exportSummary.isEmpty) {
+      toast({
+        title: "Export Error", 
+        description: exportSummary.message,
+        variant: "destructive"
+      });
+      return;
+    }
+    
+    // Log export details for debugging
+    console.log('🎬 [Export] Starting export with intervals:');
+    debugExportIntervals(exportIntervals);
+    console.log('🎬 [Export] Summary:', exportSummary);
+
     setIsExporting(true);
     try {
       const exportRequest = {
-        timeline: timeline,
+        timeline: timeline,                                    // Keep for backward compatibility
+        intervals: serializeExportIntervals(exportIntervals), // NEW: Frame-accurate intervals
         profile_id: selectedProfile.id,
         output_filename: customFilename || undefined
       };
@@ -154,7 +178,7 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
       if (response.data.success) {
         toast({
           title: "Export Started",
-          description: `Export started with ${selectedProfile.name}`,
+          description: `Export started with ${selectedProfile.name} - ${exportSummary.message}`,
         });
         
         // Switch to jobs tab to show progress

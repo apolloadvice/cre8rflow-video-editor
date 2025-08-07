@@ -19,6 +19,7 @@ from .export_profiles import export_profiles_service, ExportCategory, ExportProf
 from ..video_backend.ffmpeg_pipeline import FFMpegPipeline
 from ..timeline import Timeline
 import logging
+from supabase import create_client, Client
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,9 @@ class ExportRequest(BaseModel):
     profile_id: str = Field(..., description="Professional export profile ID")
     output_filename: Optional[str] = Field(None, description="Custom output filename")
     custom_settings: Optional[Dict[str, Any]] = Field(None, description="Override profile settings")
+    
+    # NEW: Support for precise timeline intervals (frame-accurate export)
+    intervals: Optional[List[Dict[str, Any]]] = Field(None, description="Timeline export intervals for frame-accurate processing")
 
 
 class QuickExportRequest(BaseModel):
@@ -110,6 +114,9 @@ class ExportJobManager:
         )
         
         self._jobs[job_id] = job
+        logger.info(f"🔍 [JobManager] Created job {job_id}")
+        logger.info(f"🔍 [JobManager] Total jobs in manager: {len(self._jobs)}")
+        logger.info(f"🔍 [JobManager] All job IDs: {list(self._jobs.keys())}")
         return job_id
     
     def get_job(self, job_id: str) -> Optional[ExportJob]:
@@ -124,6 +131,7 @@ class ExportJobManager:
         """Update job status"""
         if job_id in self._jobs:
             job = self._jobs[job_id]
+            old_status = job.status
             job.status = status
             if progress is not None:
                 job.progress = progress
@@ -137,6 +145,17 @@ class ExportJobManager:
                 if status == "completed" and os.path.exists(job.output_path):
                     job.file_size_mb = os.path.getsize(job.output_path) / (1024 * 1024)
                     job.download_url = f"/export/download/{job_id}"
+            
+            logger.info(f"🔍 [JobManager] Updated job {job_id}: {old_status} → {status}")
+            if progress is not None:
+                logger.info(f"🔍 [JobManager] Job {job_id} progress: {progress}%")
+            if status == "completed":
+                logger.info(f"🔍 [JobManager] Job {job_id} completed - setting up download")
+                logger.info(f"    File size: {job.file_size_mb:.1f} MB" if hasattr(job, 'file_size_mb') and job.file_size_mb else "    File size: unknown")
+                logger.info(f"    Download URL: {job.download_url}" if hasattr(job, 'download_url') else "    No download URL set")
+        else:
+            logger.error(f"🔍 [JobManager] Attempted to update non-existent job: {job_id}")
+            logger.error(f"🔍 [JobManager] Available jobs: {list(self._jobs.keys())}")
     
     def cancel_job(self, job_id: str) -> bool:
         """Cancel an export job"""
@@ -170,12 +189,93 @@ class ExportJobManager:
 # Global job manager
 job_manager = ExportJobManager()
 
+# ================== SUPABASE INTEGRATION ==================
+
+# Supabase configuration (using same config as upload_api.py)
+SUPABASE_URL = "https://fgvyotgowmcwcphsctlc.supabase.co"
+SUPABASE_SERVICE_ROLE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZndnlvdGdvd21jd2NwaHNjdGxjIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0NTczMjU5MCwiZXhwIjoyMDYxMzA4NTkwfQ.3JXr_BUDFs0c2cvNog2-igf_UWQ2H7CAp3WJL_JJLSM"
+EXPORTS_BUCKET = "exports"  # Dedicated bucket for export files
+
+def get_supabase_client() -> Client:
+    """Get Supabase client for export operations"""
+    return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+async def upload_export_to_supabase(file_path: str, job_id: str) -> str:
+    """
+    Upload exported file to Supabase storage and return download URL
+    
+    Args:
+        file_path (str): Local path to exported file
+        job_id (str): Export job ID for unique naming
+        
+    Returns:
+        str: Public download URL for the exported file
+        
+    Raises:
+        RuntimeError: If upload fails
+    """
+    try:
+        if not os.path.exists(file_path):
+            raise RuntimeError(f"Export file not found: {file_path}")
+        
+        # Get file info
+        file_size = os.path.getsize(file_path) / (1024 * 1024)  # MB
+        file_extension = os.path.splitext(file_path)[1] or '.mp4'
+        
+        # Generate storage path with job ID and timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        storage_path = f"exports/{job_id}_{timestamp}{file_extension}"
+        
+        logger.info(f"🎬 [Export] Uploading to Supabase: {storage_path} ({file_size:.1f} MB)")
+        
+        # Initialize Supabase client
+        supabase = get_supabase_client()
+        
+        # Read file and upload
+        with open(file_path, 'rb') as f:
+            file_data = f.read()
+            
+        # Upload to exports bucket
+        response = supabase.storage.from_(EXPORTS_BUCKET).upload(
+            path=storage_path,
+            file=file_data,
+            file_options={
+                "content-type": "video/mp4",
+                "cache-control": "3600"  # 1 hour cache
+            }
+        )
+        
+        if response.error:
+            raise RuntimeError(f"Supabase upload failed: {response.error}")
+        
+        # Generate signed URL for download (valid for 24 hours)
+        download_response = supabase.storage.from_(EXPORTS_BUCKET).create_signed_url(
+            path=storage_path,
+            expires_in=86400  # 24 hours in seconds
+        )
+        
+        if download_response.error:
+            raise RuntimeError(f"Failed to create download URL: {download_response.error}")
+        
+        download_url = download_response.signed_url
+        
+        logger.info(f"🎬 [Export] ✅ Upload successful: {storage_path}")
+        logger.info(f"🎬 [Export] Download URL: {download_url[:50]}...")
+        
+        return download_url
+        
+    except Exception as e:
+        error_msg = f"Failed to upload export to Supabase: {str(e)}"
+        logger.error(f"🎬 [Export] ❌ {error_msg}")
+        raise RuntimeError(error_msg) from e
+
 # ================== EXPORT PROCESSING ==================
 
 async def process_export_job(job_id: str, timeline_dict: Dict[str, Any], 
                            profile_id: str, output_path: str, 
-                           custom_settings: Optional[Dict[str, Any]] = None):
-    """Process an export job asynchronously"""
+                           custom_settings: Optional[Dict[str, Any]] = None,
+                           intervals: Optional[List[Dict[str, Any]]] = None):
+    """Process an export job asynchronously with optional timeline intervals support"""
     try:
         job_manager.update_job_status(job_id, "processing", 0.0)
         
@@ -184,12 +284,8 @@ async def process_export_job(job_id: str, timeline_dict: Dict[str, Any],
         if not profile:
             raise ValueError(f"Export profile not found: {profile_id}")
         
-        # Create timeline from dict
-        timeline = Timeline()
-        timeline.from_dict(timeline_dict)
-        
         # Create FFmpeg pipeline
-        pipeline = FFMpegPipeline(timeline)
+        pipeline = FFMpegPipeline()
         
         # Ensure output directory exists
         output_dir = os.path.dirname(output_path)
@@ -206,15 +302,14 @@ async def process_export_job(job_id: str, timeline_dict: Dict[str, Any],
         # Update progress
         job_manager.update_job_status(job_id, "processing", 25.0)
         
-        # Generate FFmpeg command using profile
-        if hasattr(pipeline, 'render_export_with_profile'):
-            # Use enhanced method if available
-            await pipeline.render_export_with_profile(output_path, profile)
-        else:
-            # Fallback to existing method with quality mapping
+        # NEW: Use timeline intervals for frame-accurate export if provided
+        if intervals and len(intervals) > 0:
+            logger.info(f"Export job {job_id}: Using {len(intervals)} timeline intervals for frame-accurate export")
+            
+            # Quality mapping from profile to FFmpeg quality setting
             quality_map = {
                 "youtube_1080p_h264": "high",
-                "youtube_4k_h264": "high",
+                "youtube_4k_h264": "high", 
                 "web_1080p_h264": "high",
                 "web_720p_h264": "medium",
                 "mobile_720p_h264": "medium",
@@ -224,25 +319,103 @@ async def process_export_job(job_id: str, timeline_dict: Dict[str, Any],
             }
             quality = quality_map.get(profile_id, "high")
             
-            # Run in thread to avoid blocking
+            # Log export details for debugging
+            total_duration = sum(float(interval.get('sourceDuration', 0)) for interval in intervals)
+            logger.info(f"Export job {job_id}: Processing {len(intervals)} segments, {total_duration:.1f}s total")
+            for i, interval in enumerate(intervals):
+                logger.info(f"  Segment {i+1}: {interval.get('clipName', 'Unknown')} - "
+                          f"{interval.get('sourceDuration', 0)}s from {interval.get('sourceStart', 0)}s")
+            
+            # Use new timeline-aware export method
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, pipeline.render_export, output_path, quality)
+            await loop.run_in_executor(None, pipeline.render_timeline_export, intervals, output_path, quality)
+            
+        else:
+            # Fallback to existing method for backward compatibility
+            logger.info(f"Export job {job_id}: Using legacy export method (no intervals provided)")
+            
+            # Create timeline from dict
+            timeline = Timeline()
+            timeline.from_dict(timeline_dict)
+            pipeline.set_timeline(timeline)
+            
+            # Generate FFmpeg command using profile
+            if hasattr(pipeline, 'render_export_with_profile'):
+                # Use enhanced method if available
+                await pipeline.render_export_with_profile(output_path, profile)
+            else:
+                # Fallback to existing method with quality mapping
+                quality_map = {
+                    "youtube_1080p_h264": "high",
+                    "youtube_4k_h264": "high",
+                    "web_1080p_h264": "high",
+                    "web_720p_h264": "medium",
+                    "mobile_720p_h264": "medium",
+                    "instagram_feed_1080": "medium",
+                    "instagram_story_1080": "medium",
+                    "tiktok_1080": "medium"
+                }
+                quality = quality_map.get(profile_id, "high")
+                
+                # Run in thread to avoid blocking
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, pipeline.render_export, output_path, quality)
         
-        # Final progress update
+        # Upload to Supabase storage
         job_manager.update_job_status(job_id, "processing", 90.0)
         
         # Verify output file exists
         if not os.path.exists(output_path):
             raise RuntimeError("Export completed but output file not found")
         
+        logger.info(f"Export job {job_id}: Uploading to Supabase storage...")
+        
+        # Upload to Supabase and get download URL
+        upload_successful = False
+        try:
+            download_url = await upload_export_to_supabase(output_path, job_id)
+            
+            # Update job with download URL
+            job = job_manager.get_job(job_id)
+            if job:
+                logger.info(f"🔍 [Export] Setting Supabase download URL for job {job_id}")
+                logger.info(f"🔍 [Export] Previous download_url: {getattr(job, 'download_url', 'None')}")
+                job.download_url = download_url
+                logger.info(f"🔍 [Export] New download_url: {job.download_url}")
+            else:
+                logger.error(f"🔍 [Export] Could not find job {job_id} to set download URL!")
+                
+            job_manager.update_job_status(job_id, "processing", 95.0)
+            logger.info(f"Export job {job_id}: Upload successful, download URL created")
+            upload_successful = True
+            
+        except Exception as upload_error:
+            logger.error(f"🔍 [Export] ❌ Upload failed: {upload_error}")
+            logger.warning(f"🔍 [Export] Keeping local file for fallback download: {output_path}")
+            # Don't clean up local file - it will be used for direct download
+        
+        # Only clean up local file if Supabase upload was successful
+        if upload_successful:
+            try:
+                if os.path.exists(output_path):
+                    os.remove(output_path)
+                    logger.info(f"🔍 [Export] Cleaned up local file (Supabase upload successful)")
+            except Exception as cleanup_error:
+                logger.warning(f"🔍 [Export] Could not clean up local file: {cleanup_error}")
+        else:
+            logger.info(f"🔍 [Export] Local file preserved for direct download: {output_path}")
+        
         # Complete the job
         job_manager.update_job_status(job_id, "completed", 100.0)
-        logger.info(f"Export job {job_id} completed successfully: {output_path}")
+        download_method = "Supabase URL" if upload_successful else "local file fallback"
+        logger.info(f"🔍 [Export] Export job {job_id} completed successfully - download via {download_method}")
         
     except Exception as e:
         error_msg = f"Export failed: {str(e)}"
         job_manager.update_job_status(job_id, "failed", error=error_msg)
         logger.error(f"Export job {job_id} failed: {error_msg}")
+        # Re-raise for proper error handling
+        raise
 
 
 # ================== API ENDPOINTS ==================
@@ -352,7 +525,8 @@ async def export_professional(request: ExportRequest, background_tasks: Backgrou
                 request.timeline, 
                 request.profile_id, 
                 output_path,
-                request.custom_settings
+                request.custom_settings,
+                request.intervals  # NEW: Pass timeline intervals for frame-accurate export
             )
         )
         job_manager._active_jobs[job_id] = task
@@ -431,21 +605,67 @@ async def cancel_export_job(job_id: str):
 @router.get("/download/{job_id}")
 async def download_export(job_id: str):
     """Download completed export file"""
+    logger.info(f"🔍 [Download] Request received for job_id: {job_id}")
+    
+    # Log job manager state
+    all_jobs = job_manager.get_all_jobs()
+    logger.info(f"🔍 [Download] Job manager has {len(all_jobs)} total jobs")
+    logger.info(f"🔍 [Download] Job IDs in manager: {[job.job_id for job in all_jobs]}")
+    
     job = job_manager.get_job(job_id)
     if not job:
+        logger.error(f"🔍 [Download] Job {job_id} NOT FOUND in job manager")
+        logger.error(f"🔍 [Download] Available jobs: {[(j.job_id, j.status) for j in all_jobs]}")
         raise HTTPException(status_code=404, detail=f"Export job not found: {job_id}")
     
+    logger.info(f"🔍 [Download] Job {job_id} FOUND - Status: {job.status}")
+    logger.info(f"🔍 [Download] Job details: created={job.created_at}, started={job.started_at}, completed={job.completed_at}")
+    
     if job.status != "completed":
+        logger.warning(f"🔍 [Download] Job {job_id} not completed. Status: {job.status}")
         raise HTTPException(status_code=400, detail=f"Export not completed. Status: {job.status}")
     
-    if not os.path.exists(job.output_path):
-        raise HTTPException(status_code=404, detail="Export file not found")
+    # Log download options
+    has_download_url = hasattr(job, 'download_url') and job.download_url and job.download_url.startswith('http')
+    has_local_file = os.path.exists(job.output_path) if hasattr(job, 'output_path') and job.output_path else False
     
-    filename = os.path.basename(job.output_path)
-    return FileResponse(
-        job.output_path,
-        filename=filename,
-        media_type="application/octet-stream"
+    logger.info(f"🔍 [Download] Job {job_id} download options:")
+    logger.info(f"    Has download_url: {has_download_url}")
+    if has_download_url:
+        logger.info(f"    Download URL: {job.download_url}")
+    logger.info(f"    Has local file: {has_local_file}")
+    if hasattr(job, 'output_path'):
+        logger.info(f"    Output path: {job.output_path}")
+    
+    # Priority 1: Use Supabase download URL if available (enhanced export system)
+    if has_download_url:
+        logger.info(f"🔍 [Download] Job {job_id}: Redirecting to Supabase download URL: {job.download_url}")
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url=job.download_url, status_code=302)
+    
+    # Priority 2: Fall back to local file serving (backward compatibility)
+    if has_local_file:
+        logger.info(f"🔍 [Download] Job {job_id}: Serving local file: {job.output_path}")
+        filename = os.path.basename(job.output_path)
+        return FileResponse(
+            job.output_path,
+            filename=filename,
+            media_type="application/octet-stream"
+        )
+    
+    # Neither option available - return 404
+    logger.error(f"🔍 [Download] Job {job_id}: No download method available")
+    logger.error(f"    download_url exists: {hasattr(job, 'download_url')}")
+    if hasattr(job, 'download_url'):
+        logger.error(f"    download_url value: '{job.download_url}'")
+    logger.error(f"    output_path exists: {hasattr(job, 'output_path')}")
+    if hasattr(job, 'output_path'):
+        logger.error(f"    output_path value: '{job.output_path}'")
+        logger.error(f"    local file exists: {os.path.exists(job.output_path)}")
+    
+    raise HTTPException(
+        status_code=404, 
+        detail="Export file not available for download. File may have been cleaned up or upload failed."
     )
 
 

@@ -351,6 +351,546 @@ class FFMpegPipeline:
             raise RuntimeError(error_msg) from e
         return None
 
+    def _detect_video_info(self, local_files: list) -> list:
+        """
+        Detect video resolution and rotation for input files using ffprobe.
+        
+        Args:
+            local_files (list): List of local file paths to analyze
+            
+        Returns:
+            list: List of dicts with video info: {'width': int, 'height': int, 'rotation': int}
+        """
+        import subprocess
+        import json
+        import re
+        
+        video_info = []
+        
+        for i, file_path in enumerate(local_files):
+            try:
+                # Use ffprobe to get video stream info
+                probe_cmd = [
+                    "ffprobe", "-v", "quiet", "-print_format", "json", 
+                    "-show_streams", "-select_streams", "v:0", file_path
+                ]
+                
+                result = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=30)
+                
+                if result.returncode == 0:
+                    probe_data = json.loads(result.stdout)
+                    streams = probe_data.get('streams', [])
+                    
+                    if streams:
+                        stream = streams[0]
+                        width = int(stream.get('width', 0))
+                        height = int(stream.get('height', 0))
+                        
+                        # Check for rotation in side_data_list
+                        rotation = 0
+                        side_data_list = stream.get('side_data_list', [])
+                        for side_data in side_data_list:
+                            if side_data.get('side_data_type') == 'Display Matrix':
+                                rotation_str = side_data.get('rotation', '0')
+                                # Extract numeric rotation value
+                                rotation_match = re.search(r'-?\d+', str(rotation_str))
+                                if rotation_match:
+                                    rotation = abs(int(rotation_match.group()))
+                        
+                        # Apply rotation to get effective resolution
+                        if rotation in [90, 270]:
+                            effective_width, effective_height = height, width
+                        else:
+                            effective_width, effective_height = width, height
+                        
+                        info = {
+                            'width': effective_width,
+                            'height': effective_height, 
+                            'rotation': rotation,
+                            'original_width': width,
+                            'original_height': height
+                        }
+                        
+                        video_info.append(info)
+                        print(f"🎬 [FFmpeg] Input {i}: {file_path.split('/')[-1]} - Resolution: {effective_width}x{effective_height} (rotation: {rotation}°)")
+                    else:
+                        # No video stream found
+                        video_info.append({'width': 0, 'height': 0, 'rotation': 0, 'original_width': 0, 'original_height': 0})
+                        print(f"🎬 [FFmpeg] Input {i}: {file_path.split('/')[-1]} - No video stream found")
+                else:
+                    # ffprobe failed
+                    video_info.append({'width': 0, 'height': 0, 'rotation': 0, 'original_width': 0, 'original_height': 0})
+                    print(f"🎬 [FFmpeg] Input {i}: Video probe failed, assuming no video")
+                    
+            except Exception as e:
+                # Error occurred
+                video_info.append({'width': 0, 'height': 0, 'rotation': 0, 'original_width': 0, 'original_height': 0})
+                print(f"🎬 [FFmpeg] Input {i}: Video detection error ({str(e)}), assuming no video")
+        
+        return video_info
+
+    def _detect_audio_streams(self, local_files: list) -> list:
+        """
+        Detect which input files have audio streams using ffprobe.
+        
+        Args:
+            local_files (list): List of local file paths to analyze
+            
+        Returns:
+            list: Boolean list indicating which files have audio streams
+        """
+        import subprocess
+        import json
+        
+        has_audio = []
+        
+        for i, file_path in enumerate(local_files):
+            try:
+                # Use ffprobe to detect audio streams
+                probe_cmd = [
+                    "ffprobe", "-v", "quiet", "-print_format", "json", 
+                    "-show_streams", "-select_streams", "a", file_path
+                ]
+                
+                result = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=30)
+                
+                if result.returncode == 0:
+                    probe_data = json.loads(result.stdout)
+                    audio_streams = probe_data.get('streams', [])
+                    has_audio_stream = len(audio_streams) > 0
+                    has_audio.append(has_audio_stream)
+                    
+                    print(f"🎬 [FFmpeg] Input {i}: {file_path.split('/')[-1]} - Audio: {'✅' if has_audio_stream else '❌'}")
+                else:
+                    # If ffprobe fails, assume no audio
+                    has_audio.append(False)
+                    print(f"🎬 [FFmpeg] Input {i}: {file_path.split('/')[-1]} - Audio probe failed, assuming no audio")
+                    
+            except Exception as e:
+                # If anything fails, assume no audio
+                has_audio.append(False)
+                print(f"🎬 [FFmpeg] Input {i}: Audio detection error ({str(e)}), assuming no audio")
+        
+        return has_audio
+
+    def _determine_target_resolution(self, video_info: list) -> tuple:
+        """
+        Determine optimal target resolution for mixed-resolution video concat.
+        
+        Args:
+            video_info (list): List of video info dicts from _detect_video_info
+            
+        Returns:
+            tuple: (target_width, target_height) for scaling
+        """
+        if not video_info:
+            return (1920, 1080)  # Default HD
+        
+        # Filter out invalid video info
+        valid_videos = [v for v in video_info if v['width'] > 0 and v['height'] > 0]
+        
+        if not valid_videos:
+            return (1920, 1080)  # Default HD
+        
+        # Analyze aspect ratios and orientations
+        landscape_count = sum(1 for v in valid_videos if v['width'] > v['height'])
+        portrait_count = sum(1 for v in valid_videos if v['width'] < v['height'])
+        
+        # Calculate average resolution for guidance
+        avg_width = sum(v['width'] for v in valid_videos) / len(valid_videos)
+        avg_height = sum(v['height'] for v in valid_videos) / len(valid_videos)
+        
+        print(f"🎬 [FFmpeg] Resolution analysis: {landscape_count} landscape, {portrait_count} portrait, avg: {avg_width:.0f}x{avg_height:.0f}")
+        
+        # Decision logic for target resolution
+        if portrait_count > landscape_count:
+            # Mostly portrait content
+            if avg_height >= 1920:
+                target_resolution = (1080, 1920)  # Full HD portrait
+            else:
+                target_resolution = (720, 1280)   # HD portrait
+        else:
+            # Mostly landscape or equal
+            if avg_width >= 2560 or avg_height >= 1440:
+                target_resolution = (1920, 1080)  # Full HD landscape
+            elif avg_width >= 1920 or avg_height >= 1080:
+                target_resolution = (1920, 1080)  # Full HD landscape  
+            else:
+                target_resolution = (1280, 720)   # HD landscape
+        
+        print(f"🎬 [FFmpeg] Target resolution selected: {target_resolution[0]}x{target_resolution[1]}")
+        return target_resolution
+
+    def _generate_scaling_filters(self, video_info: list, target_width: int, target_height: int) -> list:
+        """
+        Generate scaling filters for each input to match target resolution.
+        
+        Args:
+            video_info (list): Video info from _detect_video_info  
+            target_width (int): Target width
+            target_height (int): Target height
+            
+        Returns:
+            list: List of scaling filter strings for each input
+        """
+        scaling_filters = []
+        
+        for i, info in enumerate(video_info):
+            if info['width'] <= 0 or info['height'] <= 0:
+                # No video or invalid - skip scaling  
+                scaling_filters.append("")
+                continue
+            
+            current_width = info['width']
+            current_height = info['height']
+            
+            if current_width == target_width and current_height == target_height:
+                # Already correct resolution - no scaling needed
+                scaling_filters.append(f"[{i}:v]")
+                print(f"🎬 [FFmpeg] Input {i}: No scaling needed ({current_width}x{current_height})")
+            else:
+                # Need scaling with aspect ratio preservation and padding
+                scale_filter = (
+                    f"[{i}:v]scale={target_width}:{target_height}:"
+                    f"force_original_aspect_ratio=decrease,"
+                    f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2:black[v{i}scaled]"
+                )
+                scaling_filters.append(f"[v{i}scaled]")
+                print(f"🎬 [FFmpeg] Input {i}: Scaling {current_width}x{current_height} → {target_width}x{target_height}")
+        
+        return scaling_filters
+
+    def render_timeline_export(self, export_intervals: list, output_path: str, quality: str = "high") -> None:
+        """
+        Export precise timeline segments with frame accuracy.
+        
+        This method processes export intervals that specify exact segments to extract
+        from source files, enabling frame-accurate exports that match timeline visualization.
+        
+        Args:
+            export_intervals (list): List of intervals with sourceFile, sourceStart, sourceDuration
+            output_path (str): Path to the output video file
+            quality (str): Export quality setting (high, medium, low)
+            
+        Example export_intervals:
+        [
+            {
+                "sourceFile": "videoA.mp4", "sourceStart": 0, "sourceDuration": 10,
+                "timelineStart": 0, "clipName": "Video A part 1"
+            },
+            {
+                "sourceFile": "videoA.mp4", "sourceStart": 20, "sourceDuration": 10, 
+                "timelineStart": 10, "clipName": "Video A part 2"
+            }
+        ]
+        
+        Raises:
+            RuntimeError: If export fails
+            ValueError: If intervals are invalid
+        """
+        import requests
+        import tempfile
+        import uuid
+        import shutil
+        
+        if not export_intervals:
+            raise ValueError("No export intervals provided")
+        
+        print(f"🎬 [FFmpeg] Processing {len(export_intervals)} timeline segments for export")
+        
+        # Step 1: Prepare temp directory and download files
+        temp_dir = None
+        temp_files = []
+        
+        try:
+            temp_dir = tempfile.mkdtemp(prefix="cre8rflow_export_")
+            print(f"🎬 [FFmpeg] Created temp directory: {temp_dir}")
+            
+            # Download or prepare source files
+            for i, interval in enumerate(export_intervals):
+                source_path = interval.get('sourceFile', '')
+                
+                if not source_path:
+                    raise ValueError(f"Interval {i+1}: Missing sourceFile")
+                
+                if 'supabase' in source_path.lower() or source_path.startswith('http'):
+                    # Download from Supabase/HTTP
+                    local_path = self._download_supabase_file(source_path, temp_dir)
+                    temp_files.append(local_path)
+                    interval['localFile'] = local_path
+                    print(f"🎬 [FFmpeg] Downloaded: {interval.get('clipName', f'Interval {i+1}')} -> {os.path.basename(local_path)}")
+                else:
+                    # Local file - verify existence
+                    if not os.path.exists(source_path):
+                        raise ValueError(f"Source file not found: {source_path}")
+                    interval['localFile'] = source_path
+                    print(f"🎬 [FFmpeg] Using local: {interval.get('clipName', f'Interval {i+1}')} -> {source_path}")
+            
+            # Step 2: Generate FFmpeg inputs with precise seeking
+            inputs = []
+            for i, interval in enumerate(export_intervals):
+                source_start = float(interval.get('sourceStart', 0))
+                source_duration = float(interval.get('sourceDuration', 0))
+                local_file = interval['localFile']
+                clip_name = interval.get('clipName', f'Segment {i+1}')
+                
+                if source_duration <= 0:
+                    raise ValueError(f"Invalid sourceDuration for {clip_name}: {source_duration}")
+                
+                inputs.extend([
+                    "-ss", str(source_start),      # Seek to exact position in source
+                    "-t", str(source_duration),    # Extract exact duration
+                    "-i", local_file               # Local file path
+                ])
+                
+                print(f"🎬 [FFmpeg] Segment {i+1}: {clip_name}")
+                print(f"    Extract {source_duration}s from {source_start}s -> Timeline position {interval.get('timelineStart', i)}s")
+            
+            # Step 3: Detect video and audio streams in input files
+            local_files = [interval['localFile'] for interval in export_intervals]
+            video_info = self._detect_video_info(local_files)
+            has_audio = self._detect_audio_streams(local_files)
+            num_segments = len(export_intervals)
+            
+            print(f"🎬 [FFmpeg] Audio stream analysis: {sum(has_audio)}/{num_segments} files have audio")
+            
+            # Step 3a: Determine target resolution and generate scaling filters
+            target_width, target_height = self._determine_target_resolution(video_info)
+            scaling_filter_inputs = self._generate_scaling_filters(video_info, target_width, target_height)
+            
+            # Build video processing filters
+            scaling_filters = []
+            video_concat_inputs = []
+            
+            for i, info in enumerate(video_info):
+                if info['width'] <= 0 or info['height'] <= 0:
+                    continue  # Skip invalid video streams
+                
+                current_width = info['width']
+                current_height = info['height']
+                
+                if current_width == target_width and current_height == target_height:
+                    # No scaling needed
+                    video_concat_inputs.append(f"[{i}:v]")
+                else:
+                    # Need scaling filter
+                    scale_filter = (
+                        f"[{i}:v]scale={target_width}:{target_height}:"
+                        f"force_original_aspect_ratio=decrease,"
+                        f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2:black[v{i}scaled]"
+                    )
+                    scaling_filters.append(scale_filter)
+                    video_concat_inputs.append(f"[v{i}scaled]")
+            
+            # Build complete video filter chain
+            if scaling_filters:
+                # Have scaling filters + concat
+                scaling_part = ";".join(scaling_filters)
+                video_inputs_str = "".join(video_concat_inputs)
+                video_concat = f"{scaling_part};{video_inputs_str}concat=n={num_segments}:v=1:a=0[vout]"
+            else:
+                # No scaling needed - simple concat
+                video_inputs_str = "".join(video_concat_inputs)
+                video_concat = f"{video_inputs_str}concat=n={num_segments}:v=1:a=0[vout]"
+            
+            # Build audio concat based on detected streams
+            audio_concat = ""
+            audio_map_args = []
+            
+            if any(has_audio):
+                # At least one file has audio - create audio processing
+                audio_filter_parts = []
+                
+                for i, has_audio_stream in enumerate(has_audio):
+                    if has_audio_stream:
+                        # Use actual audio stream
+                        audio_filter_parts.append(f"[{i}:a]")
+                    else:
+                        # Generate silent audio for this input
+                        duration = float(export_intervals[i].get('sourceDuration', 0))
+                        audio_filter_parts.append(f"anullsrc=channel_layout=stereo:sample_rate=44100,atrim=duration={duration}[silent{i}]")
+                        audio_filter_parts.append(f"[silent{i}]")
+                
+                # If we have mixed scenarios, we need to handle silent audio generation differently
+                if not all(has_audio):
+                    # Mixed scenario: some have audio, some don't
+                    silent_generators = []
+                    concat_inputs = []
+                    
+                    for i, has_audio_stream in enumerate(has_audio):
+                        if has_audio_stream:
+                            concat_inputs.append(f"[{i}:a]")
+                        else:
+                            duration = float(export_intervals[i].get('sourceDuration', 0))
+                            silent_generators.append(f"anullsrc=channel_layout=stereo:sample_rate=44100,atrim=duration={duration}[silent{i}]")
+                            concat_inputs.append(f"[silent{i}]")
+                    
+                    # Build complete audio filter
+                    if silent_generators:
+                        audio_concat = f"{';'.join(silent_generators)};{''.join(concat_inputs)}concat=n={num_segments}:v=0:a=1[aout]"
+                    else:
+                        audio_concat = f"{''.join(concat_inputs)}concat=n={num_segments}:v=0:a=1[aout]"
+                else:
+                    # All files have audio - simple concat
+                    audio_inputs = "".join([f"[{i}:a]" for i in range(num_segments)])
+                    audio_concat = f"{audio_inputs}concat=n={num_segments}:v=0:a=1[aout]"
+                
+                audio_map_args = ["-map", "[aout]"]
+            else:
+                # No audio in any file - video only export
+                print(f"🎬 [FFmpeg] No audio streams detected - creating video-only export")
+                audio_concat = ""
+                audio_map_args = []
+            
+            # Create complete filter complex
+            if audio_concat:
+                filter_complex = f"{video_concat};{audio_concat}"
+            else:
+                filter_complex = video_concat
+            
+            # Step 4: Set quality parameters
+            codec_args = ["-c:v", "libx264"]
+            
+            # Add audio codec only if we have audio
+            if audio_map_args:
+                codec_args.extend(["-c:a", "aac"])
+            
+            if quality == "high":
+                codec_args.extend(["-crf", "18", "-preset", "slow"])
+                if audio_map_args:
+                    codec_args.extend(["-b:a", "192k"])
+            elif quality == "medium":
+                codec_args.extend(["-crf", "23", "-preset", "medium"])
+                if audio_map_args:
+                    codec_args.extend(["-b:a", "128k"])
+            elif quality == "low":
+                codec_args.extend(["-crf", "28", "-preset", "fast"])
+                if audio_map_args:
+                    codec_args.extend(["-b:a", "96k"])
+            else:
+                # Default to high quality
+                codec_args.extend(["-crf", "18", "-preset", "slow"])
+                if audio_map_args:
+                    codec_args.extend(["-b:a", "192k"])
+            
+            # Step 5: Build complete FFmpeg command
+            map_args = ["-map", "[vout]"] + audio_map_args
+            
+            command = [
+                "ffmpeg", "-y"  # Overwrite output file
+            ] + inputs + [
+                "-filter_complex", filter_complex
+            ] + map_args + codec_args + [
+                "-movflags", "+faststart",  # Optimize for web playback
+                output_path
+            ]
+            
+            # Step 6: Execute FFmpeg command
+            print(f"🎬 [FFmpeg] Executing timeline export...")
+            print(f"🎬 [FFmpeg] Filter complex: {filter_complex}")
+            print(f"🎬 [FFmpeg] Map args: {' '.join(map_args)}")
+            print(f"🎬 [FFmpeg] Command: ffmpeg -y {' '.join(inputs[:6])}... [filter_complex] ... {output_path}")
+            
+            result = subprocess.run(command, check=True, capture_output=True, text=True)
+            
+            # Step 7: Verify output
+            if not os.path.exists(output_path):
+                raise RuntimeError(f"FFmpeg completed but output file not found: {output_path}")
+            
+            output_size = os.path.getsize(output_path) / (1024 * 1024)  # MB
+            total_duration = sum(float(interval.get('sourceDuration', 0)) for interval in export_intervals)
+            
+            print(f"🎬 [FFmpeg] ✅ Timeline export successful!")
+            print(f"    Output: {output_path}")
+            print(f"    Size: {output_size:.1f} MB")
+            print(f"    Duration: {total_duration:.1f}s")
+            print(f"    Segments: {len(export_intervals)}")
+            
+        except subprocess.CalledProcessError as e:
+            error_msg = f"FFmpeg timeline export failed: {e.stderr}\nCommand: {' '.join(command) if 'command' in locals() else 'Unknown'}"
+            print(f"🎬 [FFmpeg] ❌ Export error: {e.stderr}")
+            raise RuntimeError(error_msg) from e
+        except Exception as e:
+            error_msg = f"Timeline export error: {str(e)}"
+            print(f"🎬 [FFmpeg] ❌ Unexpected error: {str(e)}")
+            raise RuntimeError(error_msg) from e
+        finally:
+            # Step 8: Cleanup temp files and directory
+            for temp_file in temp_files:
+                try:
+                    if os.path.exists(temp_file):
+                        os.remove(temp_file)
+                        print(f"🎬 [FFmpeg] Cleaned up: {os.path.basename(temp_file)}")
+                except Exception as cleanup_error:
+                    print(f"🎬 [FFmpeg] Warning: Could not clean up {temp_file}: {cleanup_error}")
+            
+            if temp_dir and os.path.exists(temp_dir):
+                try:
+                    shutil.rmtree(temp_dir)
+                    print(f"🎬 [FFmpeg] Cleaned up temp directory")
+                except Exception as cleanup_error:
+                    print(f"🎬 [FFmpeg] Warning: Could not clean up temp directory: {cleanup_error}")
+
+    def _download_supabase_file(self, supabase_url: str, temp_dir: str) -> str:
+        """
+        Download file from Supabase storage to local temp file.
+        
+        Args:
+            supabase_url (str): Supabase file URL or signed URL
+            temp_dir (str): Temporary directory for downloads
+            
+        Returns:
+            str: Path to downloaded local file
+            
+        Raises:
+            RuntimeError: If download fails
+        """
+        import requests
+        import uuid
+        
+        try:
+            # Generate unique filename
+            file_extension = '.mp4'  # Default to mp4, could be enhanced to detect from URL
+            if '.' in supabase_url:
+                url_parts = supabase_url.split('.')
+                potential_ext = url_parts[-1].split('?')[0]  # Remove query parameters
+                if len(potential_ext) <= 4:  # Reasonable extension length
+                    file_extension = f'.{potential_ext}'
+            
+            filename = f"temp_{uuid.uuid4()}{file_extension}"
+            local_path = os.path.join(temp_dir, filename)
+            
+            print(f"🎬 [Download] Downloading from Supabase...")
+            print(f"    URL: {supabase_url[:50]}{'...' if len(supabase_url) > 50 else ''}")
+            print(f"    Target: {local_path}")
+            
+            # Download with streaming to handle large files
+            response = requests.get(supabase_url, stream=True, timeout=300)  # 5 minute timeout
+            response.raise_for_status()
+            
+            total_size = 0
+            with open(local_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        total_size += len(chunk)
+            
+            # Verify download
+            if not os.path.exists(local_path) or os.path.getsize(local_path) == 0:
+                raise RuntimeError("Downloaded file is empty or missing")
+            
+            print(f"🎬 [Download] ✅ Downloaded {total_size / (1024*1024):.1f} MB to {filename}")
+            return local_path
+            
+        except requests.exceptions.RequestException as e:
+            error_msg = f"Failed to download from Supabase: {str(e)}"
+            print(f"🎬 [Download] ❌ {error_msg}")
+            raise RuntimeError(error_msg) from e
+        except Exception as e:
+            error_msg = f"Unexpected download error: {str(e)}"
+            print(f"🎬 [Download] ❌ {error_msg}")
+            raise RuntimeError(error_msg) from e
+
     # Placeholder for future extensibility (effects, transitions, etc.)
 
 # Register built-in effect handlers after the class definition

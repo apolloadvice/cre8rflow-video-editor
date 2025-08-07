@@ -67,6 +67,7 @@ except Exception as e:
     PERFORMANCE_ROUTER_AVAILABLE = False
     print(f"⚠️ Performance router disabled due to import error: {e}")
 
+print("🚨 [CRITICAL TEST] THIS LOG PROVES NEW CODE IS LOADING!")
 app = FastAPI()
 
 # Initialize GStreamer early in the main thread to avoid threading issues
@@ -144,8 +145,15 @@ else:
 if EXPORT_ROUTER_AVAILABLE:
     app.include_router(export_router, prefix="/api")
     print("✅ Export endpoints registered")
+    print("🔍 [Startup] Export routes available at:")
+    print("    POST /api/export - Create export job")
+    print("    GET /api/export/jobs - List all jobs")  
+    print("    GET /api/export/jobs/{job_id} - Get job status")
+    print("    GET /api/export/download/{job_id} - Download export file")
+    print("    DELETE /api/export/jobs/{job_id} - Cancel job")
 else:
-    print("⚠️ Export endpoints skipped") 
+    print("⚠️ Export endpoints skipped")
+    print("🔍 [Startup] Export download endpoint NOT available!") 
 
 # Include the Performance API router if available
 if PERFORMANCE_ROUTER_AVAILABLE:
