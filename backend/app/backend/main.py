@@ -67,6 +67,15 @@ except Exception as e:
     PERFORMANCE_ROUTER_AVAILABLE = False
     print(f"⚠️ Performance router disabled due to import error: {e}")
 
+# Try to import TwelveLabs API with error handling
+try:
+    from app.backend.twelvelabs_api import router as tl_router
+    TL_ROUTER_AVAILABLE = True
+    print("✅ TwelveLabs router loaded successfully")
+except Exception as e:
+    TL_ROUTER_AVAILABLE = False
+    print(f"⚠️ TwelveLabs router disabled due to import error: {e}")
+
 print("🚨 [CRITICAL TEST] THIS LOG PROVES NEW CODE IS LOADING!")
 app = FastAPI()
 
@@ -161,6 +170,13 @@ if PERFORMANCE_ROUTER_AVAILABLE:
     print("✅ Performance endpoints registered")
 else:
     print("⚠️ Performance endpoints skipped")
+
+# Include the TwelveLabs API router if available
+if TL_ROUTER_AVAILABLE:
+    app.include_router(tl_router, prefix="/api")
+    print("✅ TwelveLabs endpoints registered")
+else:
+    print("⚠️ TwelveLabs endpoints skipped")
 
 # Add startup and shutdown event handlers for GStreamer
 @app.on_event("startup")
