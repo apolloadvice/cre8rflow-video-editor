@@ -46,7 +46,7 @@ export const useVideoProgressAnimation = (
       const next = Math.min(99, baseProgressRef.current + additional);
       setProgress(prev => (next > prev ? next : prev));
 
-      if (next < 99 && (jobStatus === 'processing' || jobStatus === 'queued')) {
+      if (next < 99 && (jobStatus === 'processing' || jobStatus === 'queued' || jobStatus === 'pending' || jobStatus === 'starting')) {
         rafIdRef.current = requestAnimationFrame(tick);
       } else {
         rafIdRef.current = null;
@@ -59,7 +59,10 @@ export const useVideoProgressAnimation = (
   useEffect(() => {
     cancelRaf();
 
-    if (jobStatus === 'processing' || jobStatus === 'queued') {
+    const isActiveStatus = jobStatus === 'processing' || jobStatus === 'queued' || jobStatus === 'pending' || jobStatus === 'starting';
+
+    // Start animation only when status is active. startSignal can retrigger when active, but should not start by itself.
+    if (isActiveStatus) {
       startAnimation();
     } else if (jobStatus === 'completed') {
       setProgress(100);

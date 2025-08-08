@@ -37,7 +37,7 @@ import {
   downloadExport 
 } from '@/api/apiClient';
 import { useExportIntervalTree, serializeExportIntervals, debugExportIntervals } from '@/hooks/useExportIntervalTree';
-import { useExportJobProgress } from '@/hooks/useSmoothedProgress';
+import { useExportJobProgress, useVideoProgressAnimation } from '@/hooks/useSmoothedProgress';
 
 interface ExportDialogProps {
   isOpen: boolean;
@@ -63,6 +63,9 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
   const [startingJobId, setStartingJobId] = useState<string | null>(null);
   const [startingJobPlaceholder, setStartingJobPlaceholder] = useState<ExportJob | null>(null);
   const [jobStartSignals, setJobStartSignals] = useState<Record<string, number>>({});
+  // UI-only progress animation decoupled from backend/polling
+  const [uiStartSignal, setUiStartSignal] = useState<number | null>(null);
+  const uiProgress = useVideoProgressAnimation('processing', duration, uiStartSignal || undefined);
   
   // NEW: Export interval tree for frame-accurate exports
   const exportTree = useExportIntervalTree();
@@ -311,27 +314,14 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
       return;
     }
 
-    // NEW: Build export intervals for frame-accurate processing
-    const exportIntervals = exportTree.buildExportIntervals();
-    const exportSummary = exportTree.getExportSummary();
-    
-    // Validate export content
-    if (exportSummary.isEmpty) {
-      toast({
-        title: "Export Error", 
-        description: exportSummary.message,
-        variant: "destructive"
-      });
-      return;
-    }
-    
-    // Log export details for debugging
-    console.log('🎬 [Export] Starting export with intervals:');
-    debugExportIntervals(exportIntervals);
-    console.log('🎬 [Export] Summary:', exportSummary);
+    console.log('🟢 [ExportUI] Start Export clicked');
 
+    // Start client-side progress immediately when the user clicks
     setIsExporting(true);
     setIsStartingExport(true); // Start progress animation immediately
+    const uiSignal = Date.now();
+    setUiStartSignal(uiSignal);
+    console.log('🟢 [ExportUI] uiStartSignal set:', uiSignal);
 
     // Immediately create a temporary placeholder job so progress starts instantly
     const tempJobId = `pending_${Date.now()}`;
@@ -343,15 +333,48 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
       progress: 0,
       created_at: new Date().toISOString(),
     } as ExportJob;
-    setStartingJobId(tempJobId);
-    // Add a stable clientKey so the row doesn’t remount when job_id changes
+
+    // Add a stable clientKey so the row doesn't remount when job_id changes
     (tempJob as any).clientKey = tempJobId;
+
+    // CRITICAL: Set all state synchronously to prevent race conditions
+    setStartingJobId(tempJobId);
     setStartingJobPlaceholder(tempJob);
-    // Switch to jobs tab and show the temp job at the top
+    setJobStartSignals(prev => ({ ...prev, [tempJobId]: uiSignal }));
     setActiveTab('jobs');
     setExportJobs(prev => [tempJob, ...prev]);
 
+    console.log('🚀 [Progress] Starting progress animation immediately for temp job:', tempJobId);
+
     try {
+      // Build export intervals for frame-accurate processing
+      console.log('🟣 [ExportUI] Building intervals now');
+      const exportIntervals = exportTree.buildExportIntervals();
+      const exportSummary = exportTree.getExportSummary();
+      console.log('🟣 [ExportUI] Intervals built. Summary:', exportSummary);
+      
+      // Validate export content
+      if (exportSummary.isEmpty) {
+        toast({
+          title: "Export Error", 
+          description: exportSummary.message,
+          variant: "destructive"
+        });
+        // Cleanup the temporary job since we won't start a real export
+        console.log('🔴 [ExportUI] Validation failed. Cleaning temp job.');
+        setExportJobs(prev => prev.filter(j => j.job_id !== tempJobId));
+        setStartingJobId(null);
+        setStartingJobPlaceholder(null);
+        setIsStartingExport(false);
+        setIsExporting(false);
+        return;
+      }
+      
+      // Log export details for debugging
+      console.log('🎬 [Export] Starting export with intervals:');
+      debugExportIntervals(exportIntervals);
+      console.log('🎬 [Export] Summary:', exportSummary);
+
       const exportRequest = {
         timeline: timeline,                                    // Keep for backward compatibility
         intervals: serializeExportIntervals(exportIntervals), // NEW: Frame-accurate intervals
@@ -359,7 +382,9 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
         output_filename: customFilename || undefined
       };
 
+      console.log('🟣 [ExportUI] Calling startProfessionalExport');
       const response = await startProfessionalExport(exportRequest);
+      console.log('🟣 [ExportUI] startProfessionalExport returned', response.data);
 
       if (response.data.success) {
         toast({
@@ -369,6 +394,7 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
         
         // Replace the temporary job with the real job_id so the animation continues seamlessly
         const realJobId = response.data.job_id;
+        console.log('🟢 [ExportUI] Swapping temp job to real job id', { tempJobId, realJobId });
         setExportJobs(prev => {
           const replaced = prev.map(j => (
             j.job_id === tempJobId ? ({ ...(j as any), job_id: realJobId }) : j
@@ -394,6 +420,7 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
             next[realJobId] = next[tempJobId];
           }
           delete next[tempJobId];
+          console.log('🟢 [ExportUI] Transferred startSignal', next[realJobId]);
           return next;
         });
 
@@ -402,12 +429,11 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
         setIsStartingExport(false);
         
         // The dynamic polling system above will handle job completion detection
-        // No need for additional polling here
-
       } else {
         throw new Error(response.data.message || 'Export failed');
       }
     } catch (error: any) {
+      console.error('🔴 [ExportUI] Export start failed', error);
       toast({
         title: "Export Failed",
         description: error.response?.data?.detail || "Failed to start export",
@@ -417,6 +443,7 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
       setExportJobs(prev => prev.filter(j => j.job_id !== tempJobId));
       setStartingJobId(null);
       setStartingJobPlaceholder(null);
+      setIsStartingExport(false);
     } finally {
       setIsExporting(false);
     }
@@ -478,6 +505,15 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
     }
     return `${(sizeInMB / 1024).toFixed(1)} GB`;
   };
+
+  useEffect(() => {
+    // When a job completes, clear starting flags to avoid flicker
+    const hasCompleted = exportJobs.some(j => j.status === 'completed');
+    if (hasCompleted) {
+      setIsStartingExport(false);
+      setStartingJobId(null);
+    }
+  }, [exportJobs]);
 
   return (
     <Dialog open={isOpen} onOpenChange={onOpenChange}>
@@ -574,6 +610,16 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
           </TabsContent>
 
           <TabsContent value="jobs" className="mt-4">
+            {/* UI-only progress shown immediately upon starting export, independent of polling */}
+            {isStartingExport && uiStartSignal && !exportJobs.some(j => j.status === 'completed') && (
+              <div className="mb-4">
+                <Progress value={uiProgress} className="w-full" />
+                <div className="flex justify-between items-center">
+                  <p className="text-xs text-cre8r-gray-400">{Math.floor(uiProgress)}% complete</p>
+                  <p className="text-xs text-cre8r-gray-300 font-medium">Preparing export...</p>
+                </div>
+              </div>
+            )}
             <ScrollArea className="h-[400px]">
               <div className="space-y-4 pr-4">
                 {exportJobs.length === 0 ? (
@@ -621,8 +667,8 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
 
                       <div className="space-y-2">
                         <JobProgressDisplay
-                          job={job}
-                          startSignal={jobStartSignals[job.job_id]}
+                          job={{ ...job, status: (startingJobId && job.job_id === startingJobId && job.status === 'queued') ? 'starting' as any : job.status }}
+                          startSignal={jobStartSignals[job.job_id] || (startingJobId && job.job_id === startingJobId ? (uiStartSignal || undefined) : undefined)}
                         />
                       </div>
 
