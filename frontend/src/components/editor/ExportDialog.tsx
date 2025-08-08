@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Dialog, 
   DialogContent, 
@@ -23,13 +23,7 @@ import {
   Settings, 
   CheckCircle, 
   AlertCircle,
-  X,
-  Youtube,
-  Instagram,
-  Smartphone,
-  Monitor,
-  Tv,
-  Camera
+  X
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { 
@@ -37,11 +31,13 @@ import {
   ExportJob, 
   getExportProfiles, 
   getExportJobs, 
+  getExportJobsSilent, 
   startProfessionalExport, 
   cancelExportJob,
   downloadExport 
 } from '@/api/apiClient';
 import { useExportIntervalTree, serializeExportIntervals, debugExportIntervals } from '@/hooks/useExportIntervalTree';
+import { useExportJobProgress } from '@/hooks/useSmoothedProgress';
 
 interface ExportDialogProps {
   isOpen: boolean;
@@ -49,26 +45,6 @@ interface ExportDialogProps {
   timeline: any;
   duration?: number;
 }
-
-const categoryIcons = {
-  social_media: Youtube,
-  web: Monitor,
-  mobile: Smartphone,
-  broadcast: Tv,
-  cinema: Camera,
-  archive: FileVideo,
-  custom: Settings
-};
-
-const categoryColors = {
-  social_media: 'bg-red-500',
-  web: 'bg-blue-500', 
-  mobile: 'bg-green-500',
-  broadcast: 'bg-purple-500',
-  cinema: 'bg-yellow-500',
-  archive: 'bg-gray-500',
-  custom: 'bg-orange-500'
-};
 
 const ExportDialog: React.FC<ExportDialogProps> = ({
   isOpen,
@@ -83,10 +59,60 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
   const [customFilename, setCustomFilename] = useState('');
   const [exportJobs, setExportJobs] = useState<ExportJob[]>([]);
   const [isExporting, setIsExporting] = useState(false);
-  const [selectedCategory, setSelectedCategory] = useState<string>('all');
+  const [isStartingExport, setIsStartingExport] = useState(false);
+  const [startingJobId, setStartingJobId] = useState<string | null>(null);
+  const [startingJobPlaceholder, setStartingJobPlaceholder] = useState<ExportJob | null>(null);
+  const [jobStartSignals, setJobStartSignals] = useState<Record<string, number>>({});
   
   // NEW: Export interval tree for frame-accurate exports
   const exportTree = useExportIntervalTree();
+
+  // Individual job progress component with smooth animation
+  const JobProgressDisplay: React.FC<{ job: ExportJob; startSignal?: number }> = ({ job, startSignal }) => {
+    const smoothProgress = useExportJobProgress({ status: job.status }, duration, startSignal);
+    
+    // Get stage message based on smooth progress
+    const getStageMessage = (progress: number): string => {
+      if (job.status === 'completed') return 'Export completed';
+      if (job.status === 'failed') return 'Export failed';
+      if (job.status === 'queued') return 'Queued for processing';
+      if (job.status === 'cancelled') return 'Export cancelled';
+      
+      let message = '';
+      if (progress < 25) message = 'Starting export...';
+      else if (progress < 35) message = 'Downloading source files...';
+      else if (progress < 45) message = 'Preparing video segments...';
+      else if (progress < 50) message = 'Analyzing video streams...';
+      else if (progress < 65) message = 'Building processing filters...';
+      else if (progress < 85) message = 'Processing video...';
+      else if (progress < 95) message = 'Finalizing export...';
+      else message = 'Finalizing export...';
+      
+      return message;
+    };
+
+    return (
+      <>
+        <Progress value={smoothProgress} className="w-full" />
+        <div className="flex justify-between items-center">
+          <p className="text-xs text-cre8r-gray-400">
+            {smoothProgress.toFixed(0)}% complete
+          </p>
+          <p className="text-xs text-cre8r-gray-300 font-medium">
+            {getStageMessage(smoothProgress)}
+          </p>
+        </div>
+      </>
+    );
+  };
+
+  // Simple helper for debug logging (not used for display)
+  const getJobStatusForLogging = (job: ExportJob): string => {
+    if (job.status === 'completed') return 'Export completed';
+    if (job.status === 'failed') return 'Export failed';
+    if (job.status === 'processing') return 'Processing...';
+    return job.status;
+  };
 
   // Load export profiles
   useEffect(() => {
@@ -95,8 +121,8 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
         const response = await getExportProfiles();
         const profilesData = response.data;
         setProfiles(profilesData);
-        // Auto-select YouTube 1080p as default
-        const defaultProfile = profilesData.find((p: ExportProfile) => p.id === 'youtube_1080p_h264');
+        // Auto-select a default profile (previously YouTube 1080p). We will present this generically.
+        const defaultProfile = profilesData.find((p: ExportProfile) => p.id === 'youtube_1080p_h264') || profilesData[0];
         if (defaultProfile) {
           setSelectedProfile(defaultProfile);
         }
@@ -112,7 +138,12 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
 
     if (isOpen) {
       loadProfiles();
-      loadExportJobs();
+      (async () => {
+        await loadExportJobs();
+        // If there is any processing job, default to jobs tab to observe progress
+        const hasProcessing = exportJobs.some(j => j.status === 'processing');
+        if (hasProcessing) setActiveTab('jobs');
+      })();
     }
   }, [isOpen, toast]);
 
@@ -120,26 +151,161 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
   const loadExportJobs = async () => {
     try {
       const response = await getExportJobs();
-      setExportJobs(response.data);
+      // Sort newest first so the most recent job is visible
+      let jobs = [...response.data].sort((a: ExportJob, b: ExportJob) => {
+        const at = new Date(a.created_at).getTime();
+        const bt = new Date(b.created_at).getTime();
+        return bt - at;
+      });
+
+      // If we're in the middle of starting an export and the server hasn't returned the job yet,
+      // keep the local placeholder visible so the progress animation continues seamlessly.
+      if (isStartingExport && startingJobId && startingJobPlaceholder) {
+        const hasRealStartingJob = jobs.some(j => j.job_id === startingJobId);
+        if (!hasRealStartingJob) {
+          // Prepend the placeholder and filter out any duplicate IDs
+          const merged = [startingJobPlaceholder, ...jobs.filter(j => j.job_id !== startingJobPlaceholder.job_id)];
+          setExportJobs(merged);
+          return;
+        } else {
+          // Attach clientKey from placeholder to the real job so React key remains stable
+          jobs = jobs.map(j => (j.job_id === startingJobId ? ({ ...(j as any), clientKey: (startingJobPlaceholder as any).clientKey }) : j));
+          setExportJobs(jobs);
+          // We now have the real job; clear placeholder and stop local starting flag
+          setStartingJobPlaceholder(null);
+          setIsStartingExport(false);
+          return;
+        }
+      } else {
+        setExportJobs(jobs);
+      }
+
+      if (isStartingExport && startingJobId) {
+        // Additional safety: stop the flag if real job present
+        const hasRealStartingJob = jobs.some(j => j.job_id === startingJobId);
+        if (hasRealStartingJob) setIsStartingExport(false);
+      }
     } catch (error) {
       console.error('Failed to load export jobs:', error);
     }
   };
 
-  // Filter profiles by category
-  const filteredProfiles = profiles.filter(profile => 
-    selectedCategory === 'all' || profile.category === selectedCategory
-  );
+  // Load export jobs silently (for routine polling)
+  const loadExportJobsSilent = async () => {
+    try {
+      const response = await getExportJobsSilent();
+      // Sort newest first so the most recent job is visible
+      const jobs = [...response.data].sort((a: ExportJob, b: ExportJob) => {
+        const at = new Date(a.created_at).getTime();
+        const bt = new Date(b.created_at).getTime();
+        return bt - at;
+      });
+      setExportJobs(jobs);
+    } catch (error) {
+      console.error('Failed to load export jobs silently:', error);
+      // Fall back to regular loading on error
+      await loadExportJobs();
+    }
+  };
 
-  // Get unique categories
-  const categories = ['all', ...new Set(profiles.map(p => p.category))];
+  // Smart polling while dialog is open
+  useEffect(() => {
+    if (!isOpen) return;
+    
+    // Initial fetch (always logs)
+    loadExportJobs();
+    
+    let intervalId: NodeJS.Timeout;
+    let isFirstPoll = true;
+    
+    const scheduleNextPoll = () => {
+      const hasActiveJobs = exportJobs.some(job => job.status === 'processing');
+      
+      // Dynamic intervals: 500ms for active jobs, 3s for completed/idle
+      const interval = hasActiveJobs ? 500 : 3000;
+      
+      intervalId = setTimeout(async () => {
+        // Use silent polling for routine requests (after the first one)
+        if (!isFirstPoll) {
+          console.log('🔇 Using silent polling to reduce log noise');
+          await loadExportJobsSilent(); // Silent polling to reduce log noise
+        } else {
+          console.log('📢 Using normal polling for initial request');
+          await loadExportJobs(); // First poll logs normally
+          isFirstPoll = false;
+        }
+        scheduleNextPoll(); // Reschedule with updated interval
+      }, interval);
+    };
+    
+    scheduleNextPoll();
+    
+    return () => {
+      if (intervalId) clearTimeout(intervalId);
+    };
+  }, [isOpen, exportJobs]);
+
+  // Track previous job states to detect completion
+  const previousJobStates = useRef<Record<string, number | string>>({});
+
+  // Watch for job completion and show toast notification (only once per job)
+  useEffect(() => {
+    if (!isOpen || exportJobs.length === 0) return;
+    
+    // Check for newly completed/failed jobs by comparing with previous states
+    exportJobs.forEach(job => {
+      const prevStatus = previousJobStates.current[job.job_id];
+      
+      // Get previous progress for comparison
+      const prevProgressRaw = previousJobStates.current[job.job_id + '_progress'];
+      const prevProgress = typeof prevProgressRaw === 'number' ? prevProgressRaw : Number(prevProgressRaw) || 0;
+      const progressChanged = Math.abs((Number(job.progress) || 0) - prevProgress) > 5;
+      const statusChanged = job.status !== prevStatus;
+      
+      if (statusChanged || progressChanged) {
+        console.log('🍞 Toast Check Debug:', {
+          jobId: job.job_id,
+          status: job.status,
+          prevStatus: prevStatus,
+          progress: job.progress,
+          prevProgress: prevProgress,
+          stageMessage: getJobStatusForLogging(job)
+        });
+      }
+
+      // Start the local simulation exactly when a job is first observed as 'queued'
+      if (job.status === 'queued' && !previousJobStates.current[job.job_id] && !jobStartSignals[job.job_id]) {
+        setJobStartSignals(prev => ({ ...prev, [job.job_id]: Date.now() }));
+      }
+      
+      // Only show toast for NEWLY completed jobs (status changed to completed)
+      if (job.status === 'completed' && prevStatus !== 'completed') {
+        console.log('✅ Showing completion toast for job:', job.job_id);
+        toast({
+          title: "Export Completed",
+          description: "Your video export is ready for download",
+        });
+      } else if (job.status === 'failed' && prevStatus !== 'failed') {
+        console.log('❌ Showing failure toast for job:', job.job_id);
+        toast({
+          title: "Export Failed",
+          description: job.error_message || "Export processing failed",
+          variant: "destructive"
+        });
+      }
+      
+      // Update tracked state for next comparison
+      previousJobStates.current[job.job_id] = job.status;
+      previousJobStates.current[job.job_id + '_progress'] = job.progress ?? 0;
+    });
+  }, [exportJobs, isOpen, toast]);
 
   // Start export
   const handleExport = async () => {
     if (!selectedProfile || !timeline) {
       toast({
         title: "Error",
-        description: "Please select a profile and ensure timeline is available",
+        description: "Please ensure timeline is available",
         variant: "destructive"
       });
       return;
@@ -165,6 +331,26 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
     console.log('🎬 [Export] Summary:', exportSummary);
 
     setIsExporting(true);
+    setIsStartingExport(true); // Start progress animation immediately
+
+    // Immediately create a temporary placeholder job so progress starts instantly
+    const tempJobId = `pending_${Date.now()}`;
+    const tempJob: ExportJob = {
+      job_id: tempJobId,
+      status: 'queued',
+      profile_id: selectedProfile.id,
+      output_path: '',
+      progress: 0,
+      created_at: new Date().toISOString(),
+    } as ExportJob;
+    setStartingJobId(tempJobId);
+    // Add a stable clientKey so the row doesn’t remount when job_id changes
+    (tempJob as any).clientKey = tempJobId;
+    setStartingJobPlaceholder(tempJob);
+    // Switch to jobs tab and show the temp job at the top
+    setActiveTab('jobs');
+    setExportJobs(prev => [tempJob, ...prev]);
+
     try {
       const exportRequest = {
         timeline: timeline,                                    // Keep for backward compatibility
@@ -178,29 +364,45 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
       if (response.data.success) {
         toast({
           title: "Export Started",
-          description: `Export started with ${selectedProfile.name} - ${exportSummary.message}`,
+          description: `Export started - ${exportSummary.message}`,
         });
         
-        // Switch to jobs tab to show progress
-        setActiveTab('jobs');
-        loadExportJobs();
-        
-        // Poll for job updates
-        const pollInterval = setInterval(async () => {
-          await loadExportJobs();
-          const jobsResponse = await getExportJobs();
-          const currentJob = jobsResponse.data.find((j: ExportJob) => j.job_id === response.data.job_id);
-          
-          if (currentJob && (currentJob.status === 'completed' || currentJob.status === 'failed')) {
-            clearInterval(pollInterval);
-            if (currentJob.status === 'completed') {
-              toast({
-                title: "Export Completed",
-                description: "Your video export is ready for download",
-              });
+        // Replace the temporary job with the real job_id so the animation continues seamlessly
+        const realJobId = response.data.job_id;
+        setExportJobs(prev => {
+          const replaced = prev.map(j => (
+            j.job_id === tempJobId ? ({ ...(j as any), job_id: realJobId }) : j
+          ));
+          // Ensure no duplicate with the same real id
+          const deduped = [] as ExportJob[];
+          const seen = new Set<string>();
+          for (const j of replaced) {
+            if (!seen.has(j.job_id)) {
+              deduped.push(j);
+              seen.add(j.job_id);
             }
           }
-        }, 2000);
+          return deduped;
+        });
+        setStartingJobId(realJobId);
+        // Update placeholder to mirror the new real job id so merge logic stays consistent
+        setStartingJobPlaceholder(prev => (prev ? { ...prev, job_id: realJobId } as ExportJob : prev));
+        // Transfer startSignal from placeholder ID to real job ID
+        setJobStartSignals(prev => {
+          const next = { ...prev };
+          if (next[tempJobId] && !next[realJobId]) {
+            next[realJobId] = next[tempJobId];
+          }
+          delete next[tempJobId];
+          return next;
+        });
+
+        await loadExportJobs();
+        // Now that jobs have loaded, clear local starting flag
+        setIsStartingExport(false);
+        
+        // The dynamic polling system above will handle job completion detection
+        // No need for additional polling here
 
       } else {
         throw new Error(response.data.message || 'Export failed');
@@ -211,6 +413,10 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
         description: error.response?.data?.detail || "Failed to start export",
         variant: "destructive"
       });
+      // Remove the temporary job on failure
+      setExportJobs(prev => prev.filter(j => j.job_id !== tempJobId));
+      setStartingJobId(null);
+      setStartingJobPlaceholder(null);
     } finally {
       setIsExporting(false);
     }
@@ -279,111 +485,62 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
         <DialogHeader>
           <DialogTitle className="text-white flex items-center gap-2">
             <FileVideo className="w-5 h-5" />
-            Professional Export
+            Export
           </DialogTitle>
         </DialogHeader>
 
         <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1">
           <TabsList className="grid w-full grid-cols-3 bg-cre8r-gray-800">
-            <TabsTrigger value="profiles" className="text-white">Export Profiles</TabsTrigger>
+            <TabsTrigger value="profiles" className="text-white">Export</TabsTrigger>
             <TabsTrigger value="settings" className="text-white">Settings</TabsTrigger>
             <TabsTrigger value="jobs" className="text-white">Export Jobs</TabsTrigger>
           </TabsList>
 
+          {/* Simplified: Single export option */}
           <TabsContent value="profiles" className="flex-1 mt-4">
             <div className="space-y-4">
-              {/* Category Filter */}
-              <div className="flex gap-2 flex-wrap">
-                {categories.map(category => {
-                  const Icon = categoryIcons[category as keyof typeof categoryIcons] || Settings;
-                  return (
-                    <Button
-                      key={category}
-                      variant={selectedCategory === category ? "default" : "outline"}
-                      size="sm"
-                      onClick={() => setSelectedCategory(category)}
-                      className="capitalize"
-                    >
-                      <Icon className="w-4 h-4 mr-2" />
-                      {category.replace('_', ' ')}
-                    </Button>
-                  );
-                })}
-              </div>
-
-              {/* Profiles Grid */}
-              <ScrollArea className="h-[400px]">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pr-4">
-                  {filteredProfiles.map(profile => {
-                    const Icon = categoryIcons[profile.category as keyof typeof categoryIcons] || Settings;
-                    const isSelected = selectedProfile?.id === profile.id;
-                    
-                    return (
-                      <div
-                        key={profile.id}
-                        className={`p-4 rounded-lg border cursor-pointer transition-all ${
-                          isSelected 
-                            ? 'border-cre8r-violet bg-cre8r-violet/10' 
-                            : 'border-cre8r-gray-700 bg-cre8r-gray-800 hover:border-cre8r-gray-600'
-                        }`}
-                        onClick={() => setSelectedProfile(profile)}
-                      >
-                        <div className="flex items-start justify-between">
-                          <div className="flex items-center gap-3">
-                            <div className={`p-2 rounded ${categoryColors[profile.category as keyof typeof categoryColors]} text-white`}>
-                              <Icon className="w-4 h-4" />
-                            </div>
-                            <div>
-                              <h3 className="font-medium text-white">{profile.name}</h3>
-                              <p className="text-sm text-cre8r-gray-400 mt-1">
-                                {profile.description}
-                              </p>
-                            </div>
-                          </div>
-                          {isSelected && (
-                            <CheckCircle className="w-5 h-5 text-cre8r-violet" />
-                          )}
-                        </div>
-
-                        <div className="mt-3 flex gap-2 flex-wrap">
-                          <Badge variant="outline" className="text-xs">
-                            {profile.resolution}
-                          </Badge>
-                          <Badge variant="outline" className="text-xs">
-                            {profile.framerate} fps
-                          </Badge>
-                          <Badge variant="outline" className="text-xs">
-                            {profile.container.toUpperCase()}
-                          </Badge>
-                          {profile.platform_optimized && (
-                            <Badge className="text-xs bg-green-500">
-                              Platform Optimized
-                            </Badge>
-                          )}
-                        </div>
-
-                        {profile.file_size_estimate && (
-                          <p className="text-xs text-cre8r-gray-400 mt-2">
-                            {profile.file_size_estimate}
-                          </p>
-                        )}
-                      </div>
-                    );
-                  })}
+              <div
+                className={`p-4 rounded-lg border border-cre8r-gray-700 bg-cre8r-gray-800`}
+              >
+                <div className="flex items-start justify-between">
+                  <div>
+                    <h3 className="font-medium text-white">Standard Export</h3>
+                    <p className="text-sm text-cre8r-gray-400 mt-1">
+                      {selectedProfile
+                        ? `MP4 • ${selectedProfile.resolution} • ${selectedProfile.framerate} fps`
+                        : 'Preparing default export settings...'}
+                    </p>
+                  </div>
+                  {selectedProfile && (
+                    <CheckCircle className="w-5 h-5 text-cre8r-violet" />
+                  )}
                 </div>
-              </ScrollArea>
+
+                {selectedProfile && (
+                  <div className="mt-3 flex gap-2 flex-wrap">
+                    <Badge variant="outline" className="text-xs">
+                      {selectedProfile.resolution}
+                    </Badge>
+                    <Badge variant="outline" className="text-xs">
+                      {selectedProfile.framerate} fps
+                    </Badge>
+                    <Badge variant="outline" className="text-xs">
+                      {selectedProfile.container.toUpperCase()}
+                    </Badge>
+                  </div>
+                )}
+              </div>
             </div>
           </TabsContent>
 
+          {/* Simplified settings without platform/bitrate references */}
           <TabsContent value="settings" className="space-y-4 mt-4">
             {selectedProfile && (
               <div className="space-y-6">
                 <Alert className="bg-cre8r-gray-800 border-cre8r-gray-700">
                   <Settings className="h-4 w-4" />
                   <AlertDescription className="text-white">
-                    Selected Profile: <strong>{selectedProfile.name}</strong>
-                    <br />
-                    {selectedProfile.description}
+                    Format: MP4 • {selectedProfile.resolution} • {selectedProfile.framerate} fps
                   </AlertDescription>
                 </Alert>
 
@@ -400,27 +557,6 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
                     <p className="text-sm text-cre8r-gray-400 mt-1">
                       File extension (.{selectedProfile.container}) will be added automatically
                     </p>
-                  </div>
-
-                  <Separator className="bg-cre8r-gray-700" />
-
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <Label className="text-white">Resolution</Label>
-                      <p className="text-cre8r-gray-400">{selectedProfile.resolution}</p>
-                    </div>
-                    <div>
-                      <Label className="text-white">Frame Rate</Label>
-                      <p className="text-cre8r-gray-400">{selectedProfile.framerate} fps</p>
-                    </div>
-                    <div>
-                      <Label className="text-white">Container</Label>
-                      <p className="text-cre8r-gray-400">{selectedProfile.container.toUpperCase()}</p>
-                    </div>
-                    <div>
-                      <Label className="text-white">Quality</Label>
-                      <p className="text-cre8r-gray-400 capitalize">{selectedProfile.estimated_quality}</p>
-                    </div>
                   </div>
 
                   <Separator className="bg-cre8r-gray-700" />
@@ -448,14 +584,12 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
                 ) : (
                   exportJobs.map(job => (
                     <div
-                      key={job.job_id}
+                      key={(job as any).clientKey || job.job_id}
                       className="p-4 border border-cre8r-gray-700 rounded-lg bg-cre8r-gray-800"
                     >
                       <div className="flex items-center justify-between mb-2">
                         <div>
-                          <h3 className="font-medium text-white">
-                            {profiles.find(p => p.id === job.profile_id)?.name || job.profile_id}
-                          </h3>
+                          <h3 className="font-medium text-white">Standard Export</h3>
                           <p className="text-sm text-cre8r-gray-400">
                             Created: {new Date(job.created_at).toLocaleString()}
                           </p>
@@ -485,14 +619,12 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
                         </div>
                       </div>
 
-                      {job.status === 'processing' && (
-                        <div className="space-y-2">
-                          <Progress value={job.progress} className="w-full" />
-                          <p className="text-xs text-cre8r-gray-400">
-                            {job.progress.toFixed(0)}% complete
-                          </p>
-                        </div>
-                      )}
+                      <div className="space-y-2">
+                        <JobProgressDisplay
+                          job={job}
+                          startSignal={jobStartSignals[job.job_id]}
+                        />
+                      </div>
 
                       {job.error_message && (
                         <Alert className="mt-2 bg-red-900/20 border-red-900">
