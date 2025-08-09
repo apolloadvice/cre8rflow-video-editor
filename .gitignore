@@ -10,3 +10,29 @@ node_modules/
 .idea/
 dist/
 build/
+
+# Python caches and env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+*.egg-info/
+
+# Local virtualenv
+ges_env/
+
+# Backend uploads and generated media
+backend/app/backend/uploaded_videos/
+backend/uploaded_videos/
+
+# Test caches
+backend/tests/**/__pycache__/
+backend/__pycache__/
+backend/app/backend/__pycache__/
+
+# OS files
+.DS_Store
+
+# Large generated specs
+openapi-*.yaml
