@@ -183,6 +183,13 @@ else:
 async def startup_event():
     """Initialize services on startup"""
     print("🚀 FastAPI application starting up...")
+    import os
+    tl_key = os.getenv("TWELVELABS_API_KEY")
+    if tl_key:
+        masked = f"{tl_key[:6]}...{tl_key[-4:]}" if len(tl_key) > 10 else "(set)"
+        print(f"🔑 [Env] TWELVELABS_API_KEY detected: {masked}")
+    else:
+        print("⚠️ [Env] TWELVELABS_API_KEY not set")
     
 @app.on_event("shutdown") 
 async def shutdown_event():

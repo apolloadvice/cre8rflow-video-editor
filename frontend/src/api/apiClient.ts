@@ -288,6 +288,10 @@ export const startQuickExport = (timeline: any, format: string = 'youtube_1080p_
 export const getExportJobs = () =>
   axios.get<ExportJob[]>(API_BASE_URL + `/export/jobs`);
 
+// Silent polling variant (reduces backend logging via ?silent=true)
+export const getExportJobsSilent = () =>
+  axios.get<ExportJob[]>(API_BASE_URL + `/export/jobs`, { params: { silent: true } });
+
 // Get specific export job
 export const getExportJob = (jobId: string) =>
   axios.get<ExportJob>(API_BASE_URL + `/export/jobs/${jobId}`);
