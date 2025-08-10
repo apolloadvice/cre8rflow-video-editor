@@ -20,6 +20,11 @@ type VideoAsset = {
   height: number;
   size: number;
   mimetype: string;
+  // TwelveLabs indexing fields
+  indexing_status?: 'not_started' | 'starting' | 'processing' | 'completed' | 'failed';
+  indexing_progress?: number;
+  indexing_error?: string;
+  twelvelabs_video_id?: string;
 };
 
 const placeholderVideos: VideoAsset[] = [];
@@ -41,264 +46,104 @@ const AssetPanel = ({ onVideoSelect }: AssetPanelProps) => {
   const [lastSelectedIndex, setLastSelectedIndex] = useState<number>(-1);
   const { setActiveVideoAsset, addAsset } = useEditorStore();
 
-  // Fetch assets from backend and storage, auto-register missing
+  // Fetch assets from backend database only, and verify existence in storage
   const fetchAndSyncAssets = useCallback(async () => {
     try {
-      console.log("Starting fetchAndSyncAssets...");
-      
-      // 1. Try to fetch registered assets, but don't fail if this doesn't work
+      console.log("[AssetPanel] fetchAndSyncAssets (DB-only) starting...");
+
+      // 1) Fetch registered assets from backend database
       let assets: any[] = [];
       try {
-        const res = await fetch("/api/assets/list", { 
-          signal: AbortSignal.timeout(5000) // 5 second timeout
+        const res = await fetch("/api/assets/list", {
+          signal: AbortSignal.timeout(5000),
         });
         if (res.ok) {
           assets = await res.json();
-          console.log("Registered assets:", assets);
         } else {
-          console.warn("Failed to fetch registered assets, using storage files only");
+          console.warn("[AssetPanel] /api/assets/list failed:", res.status, res.statusText);
+          assets = [];
         }
       } catch (error) {
-        console.warn("Assets API unavailable, using storage files only:", error);
+        console.warn("[AssetPanel] /api/assets/list unavailable:", error);
+        assets = [];
       }
-      
-      // 2. Fetch files from Supabase Storage bucket 'assets'
-      console.log("Fetching storage files...");
-      const { data: storageFiles, error: storageError } = await supabase.storage.from("assets").list("user123", { limit: 1000 });
-      if (storageError) {
-        console.error("Storage error:", storageError);
-        throw new Error(`Storage error: ${storageError.message}`);
-      }
-      
-      console.log("Storage files:", storageFiles);
-      
-      const registeredPaths = new Set(assets.map((a: any) => a.path));
-      console.log("Registered paths:", Array.from(registeredPaths));
-      
-      // 3. Find files not in the registered assets (auto-register missing files)
-      const missingFiles = storageFiles?.filter((f: any) => {
-        const name = f.name.toLowerCase();
-        return name.endsWith(".mp4") || name.endsWith(".mov") || name.endsWith(".avi");
-      }).filter((f: any) => !registeredPaths.has(`user123/${f.name}`)) || [];
-      
-      console.log("Missing files to auto-register:", missingFiles);
-      
-      // 4. Auto-register missing files (skip if storage error)
-      let autoRegisteredCount = 0;
-      if (!storageError && missingFiles.length > 0) {
-        for (const file of missingFiles) {
+
+      if (!Array.isArray(assets)) assets = [];
+
+      console.log(`[AssetPanel] Received ${assets.length} DB assets`);
+
+      // 2) For each DB asset, verify it exists in storage by creating a signed URL
+      const mapped = await Promise.all(
+        assets.map(async (a: any) => {
           try {
-            console.log("Auto-registering file:", file.name);
-            
-            // Create signed URL to get metadata
+            const path = a.path;
+            if (!path || typeof path !== "string") {
+              console.warn("[AssetPanel] Skipping asset with invalid path:", a);
+              return null;
+            }
+
+            // Attempt to create a signed URL; skip if object not found
             const { data: urlData, error: urlError } = await supabase.storage
-              .from('assets')
-              .createSignedUrl(`user123/${file.name}`, 60); // 1 minute for metadata extraction
-            
-            if (urlError) {
-              console.error(`Failed to create signed URL for ${file.name}:`, urlError);
-              continue;
+              .from("assets")
+              .createSignedUrl(path, 3600, { download: false });
+
+            if (urlError || !urlData?.signedUrl) {
+              console.warn(`[AssetPanel] Skipping missing/broken storage object: ${path}`, urlError);
+              return null; // Do not surface this asset in the panel
             }
-            
-            const videoUrl = urlData.signedUrl;
-            
-            // Extract metadata
-            const videoElement = document.createElement("video");
-            videoElement.crossOrigin = "anonymous";
-            videoElement.src = videoUrl;
-            
-            await new Promise((resolve, reject) => {
-              videoElement.onloadedmetadata = resolve;
-              videoElement.onerror = reject;
-              setTimeout(reject, 10000); // 10 second timeout
-            });
-            
-            const metadata = {
-              originalName: file.name,
-              path: `user123/${file.name}`,
-              duration: videoElement.duration,
-              width: videoElement.videoWidth || 1920,
-              height: videoElement.videoHeight || 1080,
-              size: file.metadata?.size || 0,
-              mimetype: file.metadata?.mimetype || "video/mp4"
-            };
-            
-            console.log("Extracted metadata for auto-registration:", metadata);
-            
+
+            const signedUrl = urlData.signedUrl;
+
+            // Generate thumbnail + extract metadata. If this fails, still skip to avoid blank thumbnails
+            let thumbnail = "";
+            let extractedDuration = a.duration || 0;
+            let extractedWidth = a.width || 1920;
+            let extractedHeight = a.height || 1080;
+
             try {
-              const registerRes = await fetch("/api/assets/register", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(metadata),
-                signal: AbortSignal.timeout(5000) // 5 second timeout for registration too
-              });
-              
-              if (registerRes.ok) {
-                console.log(`Successfully auto-registered ${file.name}`);
-                autoRegisteredCount++;
-              } else {
-                console.warn(`Failed to auto-register ${file.name} - proceeding without registration`);
-              }
-            } catch (registerError) {
-              console.warn(`Registration API unavailable for ${file.name} - proceeding without registration:`, registerError);
+              const result = await generateVideoThumbnailWithMetadata(signedUrl);
+              thumbnail = result.thumbnail;
+              extractedDuration = result.duration;
+              extractedWidth = result.width;
+              extractedHeight = result.height;
+            } catch (e) {
+              console.warn(`[AssetPanel] Thumbnail generation failed for ${path}, skipping asset`, e);
+              return null; // Skip to avoid blank placeholder as requested
             }
-          } catch (error) {
-            console.error(`Error auto-registering ${file.name}:`, error);
-          }
-        }
-      }
-      
-      // 5. Re-fetch updated assets if any were auto-registered
-      let updatedAssets = assets;
-      if (autoRegisteredCount > 0) {
-        console.log(`Re-fetching assets after auto-registering ${autoRegisteredCount} files...`);
-        try {
-          const updatedRes = await fetch("/api/assets/list", { 
-            signal: AbortSignal.timeout(5000) 
-          });
-          if (updatedRes.ok) {
-            updatedAssets = await updatedRes.json();
-            console.log("Updated assets after auto-registration:", updatedAssets);
-          }
-        } catch (error) {
-          console.warn("Could not re-fetch assets after registration, using original list:", error);
-        }
-      }
-      
-      // 6. If no registered assets available, create asset objects directly from storage files
-      if (updatedAssets.length === 0 && storageFiles) {
-        console.log("No registered assets available, creating assets from storage files directly...");
-        const videoFiles = storageFiles.filter((f: any) => {
-          const name = f.name.toLowerCase();
-          return name.endsWith(".mp4") || name.endsWith(".mov") || name.endsWith(".avi");
-        });
-        
-        updatedAssets = videoFiles.map((file: any) => ({
-          id: file.id,
-          path: `user123/${file.name}`,
-          original_name: file.name,
-          duration: 0, // Will be extracted during thumbnail generation
-          width: 1920, // Default values
-          height: 1080,
-          size: file.metadata?.size || 0,
-          mimetype: file.metadata?.mimetype || "video/mp4",
-          updated_at: file.updated_at || new Date().toISOString()
-        }));
-        
-        console.log(`Created ${updatedAssets.length} asset objects from storage files`);
-      }
-      
-      console.log(`Processing ${updatedAssets.length} assets for thumbnails...`);
-      
-      // 7. Generate thumbnails and video URLs for assets (with better error handling)
-      const mapped = await Promise.allSettled(updatedAssets.map(async (a: any) => {
-        console.log(`Processing asset: ${a.original_name || a.path}`);
-        
-        // Get Supabase Storage signed URL for the video with CORS headers
-        let videoUrl = null;
-        try {
-          const { data: urlData, error: urlError } = await supabase.storage
-            .from('assets')
-            .createSignedUrl(a.path, 3600, {
-              download: false // Ensure we get a viewable URL, not a download URL
-            });
-          
-          if (urlError) {
-            console.error(`Failed to create signed URL for ${a.path}:`, urlError);
-          } else {
-            videoUrl = urlData?.signedUrl;
-            console.log(`✅ Created signed URL for ${a.original_name || a.path}`);
-          }
-        } catch (e) {
-          console.error(`Error creating signed URL for ${a.path}:`, e);
-        }
-        
-        // Generate thumbnail and extract metadata from video if URL is available
-        let thumbnail = ""; // Start with empty - no fallback thumbnails as requested
-        let extractedDuration = a.duration || 0; // Use existing duration as fallback
-        let extractedWidth = a.width || 1920;
-        let extractedHeight = a.height || 1080;
-        
-        if (videoUrl) {
-          try {
-            console.log(`Generating thumbnail and extracting metadata for ${a.original_name || a.path}...`);
-            const result = await generateVideoThumbnailWithMetadata(videoUrl);
-            thumbnail = result.thumbnail;
-            extractedDuration = result.duration;
-            extractedWidth = result.width;
-            extractedHeight = result.height;
-            console.log(`✅ Generated thumbnail and extracted metadata for ${a.original_name || a.path}: ${extractedDuration}s, ${extractedWidth}x${extractedHeight}`);
+
+            return {
+              id: a.id,
+              name: a.original_name || path.split("/").pop() || path,
+              file_path: path,
+              duration: extractedDuration,
+              width: extractedWidth,
+              height: extractedHeight,
+              size: a.size || 0,
+              mimetype: a.mimetype || "",
+              thumbnail,
+              uploaded: a.updated_at ? new Date(a.updated_at) : new Date(),
+              src: signedUrl,
+            } as VideoAsset;
           } catch (e) {
-            console.warn(`Failed to generate thumbnail for ${a.path}:`, e);
-            // If CORS fails, try creating a new signed URL without download flag
-            if (e.message?.includes('SecurityError') || e.message?.includes('tainted') || e.message?.includes('CORS')) {
-              try {
-                console.log(`Retrying thumbnail generation with public URL for ${a.original_name || a.path}...`);
-                const { data: publicData } = supabase.storage
-                  .from('assets')
-                  .getPublicUrl(a.path);
-                
-                if (publicData?.publicUrl) {
-                  const result = await generateVideoThumbnailWithMetadata(publicData.publicUrl);
-                  thumbnail = result.thumbnail;
-                  extractedDuration = result.duration;
-                  extractedWidth = result.width;
-                  extractedHeight = result.height;
-                  console.log(`✅ Generated thumbnail with public URL for ${a.original_name || a.path}: ${extractedDuration}s, ${extractedWidth}x${extractedHeight}`);
-                }
-              } catch (retryError) {
-                console.error(`Retry also failed for ${a.path}:`, retryError);
-                // Leave thumbnail empty as requested - no fallbacks
-              }
-            }
+            console.warn("[AssetPanel] Error mapping asset, skipping:", a, e);
+            return null;
           }
-        }
-        
-        return {
-          id: a.id,
-          name: a.original_name || a.path.split("/").pop() || a.path,
-          file_path: a.path,
-          duration: extractedDuration,
-          width: extractedWidth,
-          height: extractedHeight,
-          size: a.size || 0,
-          mimetype: a.mimetype || "",
-          thumbnail,
-          uploaded: a.updated_at ? new Date(a.updated_at) : new Date(),
-          src: videoUrl, // Add the signed video URL for drag and drop
-        };
-      }));
-      
-      // Handle settled promises (both fulfilled and rejected)
-      const successfulAssets = mapped
-        .filter((result): result is PromiseFulfilledResult<any> => result.status === 'fulfilled')
-        .map(result => result.value);
-      
-      const failedAssets = mapped
-        .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
-        .map(result => result.reason);
-      
-      if (failedAssets.length > 0) {
-        console.warn(`Failed to process ${failedAssets.length} assets:`, failedAssets);
-      }
-      
-      console.log(`Successfully processed ${successfulAssets.length} assets:`, successfulAssets);
+        })
+      );
+
+      const successfulAssets = mapped.filter((v): v is VideoAsset => !!v);
+
+      console.log(`[AssetPanel] Final asset count after verification: ${successfulAssets.length}`);
       setUploadedVideos(successfulAssets);
-      
-      // Add assets to the editor store for drag and drop functionality
-      successfulAssets.forEach(asset => {
-        addAsset({
-          id: asset.id,
-          name: asset.name,
-          file_path: asset.file_path,
-          duration: asset.duration,
-        });
+
+      // 3) Sync verified assets into editor store for DnD
+      successfulAssets.forEach((asset) => {
+        addAsset({ id: asset.id, name: asset.name, file_path: asset.file_path, duration: asset.duration });
       });
-      
-      console.log(`✅ Completed fetchAndSyncAssets with ${successfulAssets.length} assets`);
-      
+
+      console.log("[AssetPanel] fetchAndSyncAssets complete");
     } catch (error) {
-      console.error("Error in fetchAndSyncAssets:", error);
+      console.error("[AssetPanel] Error in fetchAndSyncAssets:", error);
       toast({
         title: "Failed to fetch assets",
         description: error instanceof Error ? error.message : "Unknown error occurred",
@@ -306,6 +151,37 @@ const AssetPanel = ({ onVideoSelect }: AssetPanelProps) => {
       });
     }
   }, [toast, addAsset]);
+
+  // Function to retry TwelveLabs indexing for a failed asset
+  const retryIndexing = async (assetId: string) => {
+    try {
+      console.log(`🔄 [AssetPanel] Retrying TwelveLabs indexing for asset ${assetId}`);
+      
+      const response = await fetch(`/api/assets/${assetId}/retry-indexing`, { 
+        method: 'POST' 
+      });
+      
+      if (response.ok) {
+        toast({
+          title: "Indexing retry started",
+          description: "The video will be re-indexed for search functionality."
+        });
+        
+        // Refresh assets to show updated status
+        fetchAndSyncAssets();
+      } else {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+      
+    } catch (error) {
+      console.error(`❌ [AssetPanel] Error retrying indexing:`, error);
+      toast({
+        title: "Retry failed", 
+        description: "Could not restart indexing. Please try again later.",
+        variant: "destructive"
+      });
+    }
+  };
 
   // Function to generate thumbnail and extract metadata from video URL
   const generateVideoThumbnailWithMetadata = (videoUrl: string): Promise<{thumbnail: string, duration: number, width: number, height: number}> => {
@@ -1041,17 +917,47 @@ const AssetPanel = ({ onVideoSelect }: AssetPanelProps) => {
                 <span className="text-sm text-cre8r-violet font-medium">
                   {selectedAssets.size} asset{selectedAssets.size > 1 ? 's' : ''} selected
                 </span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => {
-                    setSelectedAssets(new Set());
-                    setLastSelectedIndex(-1);
-                  }}
-                  className="text-xs text-cre8r-gray-300 hover:text-white"
-                >
-                  Clear selection
-                </Button>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    onClick={async () => {
+                      try {
+                        const ids = Array.from(selectedAssets);
+                        // Delete sequentially to keep it simple / avoid rate limits
+                        for (const id of ids) {
+                          const res = await fetch(`/api/assets/${id}`, { method: 'DELETE' });
+                          if (!res.ok) {
+                            const detail = await res.text();
+                            throw new Error(detail || `Failed to delete asset ${id}`);
+                          }
+                        }
+                        // Update local list
+                        setUploadedVideos(prev => prev.filter(v => !selectedAssets.has(v.id)));
+                        setSelectedAssets(new Set());
+                        setSelectionOrder([]);
+                        setLastSelectedIndex(-1);
+                        toast({ title: 'Deleted', description: 'Selected asset(s) removed.' });
+                      } catch (e: any) {
+                        toast({ title: 'Delete failed', description: e?.message || 'Error deleting assets', variant: 'destructive' });
+                      }
+                    }}
+                    className="text-xs"
+                  >
+                    Delete
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setSelectedAssets(new Set());
+                      setLastSelectedIndex(-1);
+                    }}
+                    className="text-xs text-cre8r-gray-300 hover:text-white"
+                  >
+                    Clear selection
+                  </Button>
+                </div>
               </div>
             )}
             
@@ -1094,6 +1000,40 @@ const AssetPanel = ({ onVideoSelect }: AssetPanelProps) => {
                       {selectedAssets.size > 1 && isSelected && (
                         <div className="absolute top-1 right-1 bg-cre8r-violet text-white text-xs px-1.5 py-0.5 rounded-full font-medium">
                           {Array.from(selectedAssets).indexOf(video.id) + 1}
+                        </div>
+                      )}
+                      
+                      {/* TwelveLabs Indexing Status Badges */}
+                      {video.indexing_status === 'starting' && (
+                        <div className="absolute top-1 left-1 bg-yellow-600 text-white text-xs px-2 py-1 rounded flex items-center gap-1">
+                          <div className="animate-pulse w-2 h-2 bg-white rounded-full"></div>
+                          Starting...
+                        </div>
+                      )}
+                      
+                      {video.indexing_status === 'processing' && (
+                        <div className="absolute top-1 left-1 bg-blue-600 text-white text-xs px-2 py-1 rounded flex items-center gap-1">
+                          <div className="animate-spin w-3 h-3 border border-white border-t-transparent rounded-full"></div>
+                          {video.indexing_progress || 0}%
+                        </div>
+                      )}
+                      
+                      {video.indexing_status === 'completed' && (
+                        <div className="absolute top-1 left-1 bg-green-600 text-white text-xs px-2 py-1 rounded flex items-center gap-1">
+                          ✅ Indexed
+                        </div>
+                      )}
+                      
+                      {video.indexing_status === 'failed' && (
+                        <div 
+                          className="absolute top-1 left-1 bg-red-600 text-white text-xs px-2 py-1 rounded cursor-pointer flex items-center gap-1 hover:bg-red-700 transition-colors"
+                          onClick={(e) => {
+                            e.stopPropagation(); // Prevent asset selection
+                            retryIndexing(video.id);
+                          }}
+                          title={video.indexing_error || 'Indexing failed - click to retry'}
+                        >
+                          ❌ Retry
                         </div>
                       )}
                     </div>

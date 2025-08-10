@@ -9,6 +9,13 @@ from supabase import create_client, Client
 import tempfile
 import subprocess
 import shutil
+import asyncio
+import logging
+
+# Import TwelveLabs service
+from .twelvelabs_service import twelvelabs_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -182,6 +189,10 @@ async def register_asset(payload: RegisterAssetRequest, request: Request):
                 os.remove(tmp_path)
             except Exception:
                 pass
+    # TODO: Get actual user_id from authentication
+    # For now, leave user_id as NULL since we don't have user auth yet
+    user_id = "user123"  # Used for TwelveLabs indexing logic
+    
     asset_data = {
         "path": payload.path,
         "original_name": payload.originalName,
@@ -190,18 +201,168 @@ async def register_asset(payload: RegisterAssetRequest, request: Request):
         "height": height,
         "size": payload.size,
         "mimetype": payload.mimetype,
-        # TODO: Add user_id from auth if available
+        # Don't set user_id in database yet - leave as NULL until we have proper auth
+        "indexing_status": "not_started"
     }
+    
     # Insert into assets table
     try:
         result = supabase.table("assets").insert(asset_data).execute()
         if result.data and len(result.data) > 0:
             asset_id = result.data[0]["id"]
+            
+            # Start TwelveLabs indexing in background (non-blocking)
+            logger.info(f"🚀 [Upload] Starting background TwelveLabs indexing for asset {asset_id}")
+            asyncio.create_task(start_background_indexing(asset_id, user_id, payload.path))
+            
             return RegisterAssetResponse(id=asset_id, status="registered")
         else:
             raise HTTPException(status_code=500, detail="Failed to insert asset metadata.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Supabase error: {e}")
+
+
+async def start_background_indexing(asset_id: str, user_id: str, file_path: str):
+    """
+    Background task to start TwelveLabs indexing for a newly uploaded asset.
+    This runs in parallel with the user's upload workflow.
+    """
+    try:
+        logger.info(f"📤 [Background] Starting TwelveLabs indexing for asset {asset_id}")
+        
+        # Create signed URL with longer expiry for indexing (2 hours)
+        supabase = get_supabase_client()
+        signed_url_response = supabase.storage.from_("assets").create_signed_url(file_path, 7200)
+        
+        if signed_url_response.error:
+            raise Exception(f"Failed to create signed URL: {signed_url_response.error}")
+        
+        video_url = signed_url_response.signed_url
+        logger.info(f"🔗 [Background] Created signed URL for TwelveLabs access")
+        
+        # Start indexing using the TwelveLabs service
+        await twelvelabs_service.start_indexing(asset_id, user_id, video_url)
+        
+        logger.info(f"✅ [Background] TwelveLabs indexing initiated for asset {asset_id}")
+        
+    except Exception as e:
+        logger.error(f"❌ [Background] Failed to start TwelveLabs indexing for asset {asset_id}: {e}")
+        
+        # Update asset with error status
+        try:
+            supabase = get_supabase_client()
+            supabase.table("assets").update({
+                "indexing_status": "failed",
+                "indexing_error": str(e)
+            }).eq("id", asset_id).execute()
+        except Exception as db_error:
+            logger.error(f"❌ [Background] Failed to update error status in database: {db_error}")
+
+# ================== TWELVELABS INDEXING API ENDPOINTS ==================
+
+@router.get("/assets/{asset_id}/indexing-status")
+async def get_asset_indexing_status(asset_id: str):
+    """Get indexing status for a specific asset."""
+    try:
+        status = await twelvelabs_service.get_indexing_status(asset_id)
+        return status
+    except Exception as e:
+        logger.error(f"❌ [API] Error getting indexing status for asset {asset_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/assets/{asset_id}/retry-indexing")
+async def retry_asset_indexing(asset_id: str):
+    """Retry indexing for a failed asset."""
+    try:
+        user_id = "user123"  # TODO: Get from authentication
+        await twelvelabs_service.retry_indexing(asset_id, user_id)
+        return {"success": True, "message": "Indexing retry started"}
+    except Exception as e:
+        logger.error(f"❌ [API] Error retrying indexing for asset {asset_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/assets/indexing-progress")
+async def get_all_indexing_progress():
+    """Get indexing progress for all active indexing tasks."""
+    try:
+        supabase = get_supabase_client()
+        result = supabase.table("assets").select(
+            "id, original_name, indexing_status, indexing_progress, indexing_error"
+        ).in_("indexing_status", ["starting", "processing"]).execute()
+        
+        return {"active_indexing": result.data or []}
+    except Exception as e:
+        logger.error(f"❌ [API] Error getting indexing progress: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/assets/search")
+async def search_assets(query: str, user_id: str = "user123"):
+    """Search indexed videos using natural language."""
+    try:
+        logger.info(f"🔍 [API] Search request: '{query}' for user {user_id}")
+        results = await twelvelabs_service.search_videos(user_id, query)
+        return {"results": results}
+    except Exception as e:
+        logger.error(f"❌ [API] Error searching assets: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/assets/sync-existing")
+async def sync_existing_assets(user_id: str = "user123"):
+    """Sync existing unindexed assets for a user."""
+    try:
+        logger.info(f"🔄 [API] Starting sync for existing assets for user {user_id}")
+        await twelvelabs_service.sync_existing_assets(user_id)
+        return {"success": True, "message": "Asset sync started"}
+    except Exception as e:
+        logger.error(f"❌ [API] Error syncing existing assets: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/assets/index-stats")
+async def get_user_index_stats(user_id: str = "user123"):
+    """Get statistics about a user's TwelveLabs index."""
+    try:
+        stats = await twelvelabs_service.get_user_index_stats(user_id)
+        return stats
+    except Exception as e:
+        logger.error(f"❌ [API] Error getting index stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/assets/{asset_id}")
+async def delete_asset(asset_id: str):
+    """
+    Delete an asset by ID: remove from Supabase Storage and delete DB record.
+    """
+    supabase = get_supabase_client()
+    try:
+        # Look up asset
+        result = supabase.table("assets").select("*").eq("id", asset_id).execute()
+        records = result.data or []
+        if not records:
+            raise HTTPException(status_code=404, detail="Asset not found")
+        asset = records[0]
+        path = asset.get("path")
+
+        # Best-effort: remove storage object (skip error if missing)
+        try:
+            if path:
+                remove_resp = supabase.storage.from_(SUPABASE_BUCKET).remove(path)
+                # Some clients expect list; if above fails, try list form
+                if getattr(remove_resp, "error", None):
+                    supabase.storage.from_(SUPABASE_BUCKET).remove([path])
+        except Exception as e:
+            # Log but do not block DB deletion
+            logger.warning(f"[Assets] Storage remove failed for {path}: {e}")
+
+        # Delete DB record
+        supabase.table("assets").delete().eq("id", asset_id).execute()
+
+        return {"success": True, "deleted_id": asset_id, "deleted_path": path}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Delete failed: {e}")
+
+# ================== LEGACY UPLOAD ENDPOINT ==================
 
 @router.post("/upload")
 async def upload_video(file: UploadFile = File(...)):
