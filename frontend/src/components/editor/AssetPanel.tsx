@@ -7,6 +7,7 @@ import { Search, Upload, RefreshCcw } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import { useEditorStore } from "@/store/editorStore";
+import { useAllIndexingProgress, useIndexingStatus } from "@/hooks/useIndexingStatus";
 
 type VideoAsset = {
   id: string;
@@ -123,6 +124,11 @@ const AssetPanel = ({ onVideoSelect }: AssetPanelProps) => {
               thumbnail,
               uploaded: a.updated_at ? new Date(a.updated_at) : new Date(),
               src: signedUrl,
+              // TwelveLabs indexing fields from API response
+              indexing_status: a.indexing_status || 'not_started',
+              indexing_progress: a.indexing_progress || 0,
+              indexing_error: a.indexing_error,
+              twelvelabs_video_id: a.twelvelabs_video_id,
             } as VideoAsset;
           } catch (e) {
             console.warn("[AssetPanel] Error mapping asset, skipping:", a, e);
@@ -151,6 +157,23 @@ const AssetPanel = ({ onVideoSelect }: AssetPanelProps) => {
       });
     }
   }, [toast, addAsset]);
+
+  // Monitor active indexing progress and refresh assets when indexing status changes
+  const { activeIndexing, hasActiveJobs } = useAllIndexingProgress();
+
+  // Set up continuous polling that refreshes more frequently during indexing
+  useEffect(() => {
+    // Always poll, but use different intervals based on active jobs
+    const pollInterval = hasActiveJobs ? 3000 : 10000; // 3s during indexing, 10s when idle
+    const interval = setInterval(fetchAndSyncAssets, pollInterval);
+    
+    console.log(`🔄 [AssetPanel] Started polling with ${pollInterval}ms interval (hasActiveJobs: ${hasActiveJobs})`);
+    
+    return () => {
+      clearInterval(interval);
+      console.log(`⏹️ [AssetPanel] Stopped polling interval`);
+    };
+  }, [hasActiveJobs, fetchAndSyncAssets]);
 
   // Function to retry TwelveLabs indexing for a failed asset
   const retryIndexing = async (assetId: string) => {
@@ -181,6 +204,111 @@ const AssetPanel = ({ onVideoSelect }: AssetPanelProps) => {
         variant: "destructive"
       });
     }
+  };
+
+  // Individual video item component with real-time indexing status
+  const VideoItem = ({ video, index, isSelected, onVideoClick, onDragStart }: {
+    video: VideoAsset;
+    index: number;
+    isSelected: boolean;
+    onVideoClick: (video: VideoAsset, index: number, event: React.MouseEvent) => void;
+    onDragStart: (e: React.DragEvent, video: VideoAsset) => void;
+  }) => {
+    // Get real-time indexing status for processing videos
+    const shouldMonitor = video.indexing_status === 'starting' || video.indexing_status === 'processing';
+    const { 
+      indexing_status, 
+      indexing_progress, 
+      indexing_error, 
+      isCompleted, 
+      isFailed 
+    } = useIndexingStatus(shouldMonitor ? video.id : undefined, 2000); // 2s polling for active items
+    
+    // Use real-time data when available, fall back to static data
+    const currentStatus = shouldMonitor ? indexing_status : video.indexing_status;
+    const currentProgress = shouldMonitor ? indexing_progress : video.indexing_progress;
+    const currentError = shouldMonitor ? indexing_error : video.indexing_error;
+    
+    return (
+      <div 
+        key={video.id} 
+        className={cn(
+          "bg-cre8r-gray-700 rounded-lg overflow-hidden cursor-pointer transition-all group",
+          isSelected 
+            ? "ring-2 ring-cre8r-violet bg-cre8r-violet/10" 
+            : "hover:ring-1 hover:ring-cre8r-violet"
+        )}
+        onClick={(event) => onVideoClick(video, index, event)}
+        draggable
+        onDragStart={(e) => onDragStart(e, video)}
+      >
+        <div className="relative">
+          <img 
+            src={video.thumbnail} 
+            alt={video.name} 
+            className="w-full h-24 object-cover"
+          />
+          <div className="absolute bottom-1 right-1 bg-black/70 text-white text-xs px-1 rounded">
+            {formatDuration(video.duration)}
+          </div>
+          {/* Selection indicator */}
+          {isSelected && (
+            <div className="absolute top-1 left-1 w-5 h-5 bg-cre8r-violet rounded-full flex items-center justify-center">
+              <div className="w-2 h-2 bg-white rounded-full"></div>
+            </div>
+          )}
+          {/* Multi-select badge */}
+          {selectedAssets.size > 1 && isSelected && (
+            <div className="absolute top-1 right-1 bg-cre8r-violet text-white text-xs px-1.5 py-0.5 rounded-full font-medium">
+              {Array.from(selectedAssets).indexOf(video.id) + 1}
+            </div>
+          )}
+          
+          {/* Real-time TwelveLabs Indexing Status Badges */}
+          {currentStatus === 'starting' && (
+            <div className="absolute top-1 left-1 bg-yellow-600 text-white text-xs px-2 py-1 rounded flex items-center gap-1">
+              <div className="animate-pulse w-2 h-2 bg-white rounded-full"></div>
+              Starting...
+            </div>
+          )}
+          
+          {currentStatus === 'processing' && (
+            <div className="absolute top-1 left-1 bg-blue-600 text-white text-xs px-2 py-1 rounded flex items-center gap-1">
+              <div className="animate-spin w-3 h-3 border border-white border-t-transparent rounded-full"></div>
+              {currentProgress || 0}%
+            </div>
+          )}
+          
+          {currentStatus === 'completed' && (
+            <div className="absolute top-1 left-1 bg-green-600 text-white text-xs px-2 py-1 rounded flex items-center gap-1">
+              ✅ Indexed
+            </div>
+          )}
+          
+          {currentStatus === 'failed' && (
+            <div 
+              className="absolute top-1 left-1 bg-red-600 text-white text-xs px-2 py-1 rounded cursor-pointer flex items-center gap-1 hover:bg-red-700 transition-colors"
+              onClick={(e) => {
+                e.stopPropagation(); // Prevent asset selection
+                retryIndexing(video.id);
+              }}
+              title={currentError || 'Indexing failed - click to retry'}
+            >
+              ❌ Retry
+            </div>
+          )}
+        </div>
+        
+        <div className="p-3">
+          <div className="text-sm text-white truncate font-medium mb-1">
+            {video.name}
+          </div>
+          <div className="text-xs text-cre8r-gray-400">
+            Uploaded {video.uploaded.toLocaleDateString()}
+          </div>
+        </div>
+      </div>
+    );
   };
 
   // Function to generate thumbnail and extract metadata from video URL
@@ -969,78 +1097,14 @@ const AssetPanel = ({ onVideoSelect }: AssetPanelProps) => {
               uploadedVideos.map((video, index) => {
                 const isSelected = selectedAssets.has(video.id);
                 return (
-                  <div 
-                    key={video.id} 
-                    className={cn(
-                      "bg-cre8r-gray-700 rounded-lg overflow-hidden cursor-pointer transition-all group",
-                      isSelected 
-                        ? "ring-2 ring-cre8r-violet bg-cre8r-violet/10" 
-                        : "hover:ring-1 hover:ring-cre8r-violet"
-                    )}
-                    onClick={(event) => handleVideoClick(video, index, event)}
-                    draggable
-                    onDragStart={(e) => handleDragStart(e, video)}
-                  >
-                    <div className="relative">
-                      <img 
-                        src={video.thumbnail} 
-                        alt={video.name} 
-                        className="w-full h-24 object-cover"
-                      />
-                      <div className="absolute bottom-1 right-1 bg-black/70 text-white text-xs px-1 rounded">
-                        {formatDuration(video.duration)}
-                      </div>
-                      {/* Selection indicator */}
-                      {isSelected && (
-                        <div className="absolute top-1 left-1 w-5 h-5 bg-cre8r-violet rounded-full flex items-center justify-center">
-                          <div className="w-2 h-2 bg-white rounded-full"></div>
-                        </div>
-                      )}
-                      {/* Multi-select badge */}
-                      {selectedAssets.size > 1 && isSelected && (
-                        <div className="absolute top-1 right-1 bg-cre8r-violet text-white text-xs px-1.5 py-0.5 rounded-full font-medium">
-                          {Array.from(selectedAssets).indexOf(video.id) + 1}
-                        </div>
-                      )}
-                      
-                      {/* TwelveLabs Indexing Status Badges */}
-                      {video.indexing_status === 'starting' && (
-                        <div className="absolute top-1 left-1 bg-yellow-600 text-white text-xs px-2 py-1 rounded flex items-center gap-1">
-                          <div className="animate-pulse w-2 h-2 bg-white rounded-full"></div>
-                          Starting...
-                        </div>
-                      )}
-                      
-                      {video.indexing_status === 'processing' && (
-                        <div className="absolute top-1 left-1 bg-blue-600 text-white text-xs px-2 py-1 rounded flex items-center gap-1">
-                          <div className="animate-spin w-3 h-3 border border-white border-t-transparent rounded-full"></div>
-                          {video.indexing_progress || 0}%
-                        </div>
-                      )}
-                      
-                      {video.indexing_status === 'completed' && (
-                        <div className="absolute top-1 left-1 bg-green-600 text-white text-xs px-2 py-1 rounded flex items-center gap-1">
-                          ✅ Indexed
-                        </div>
-                      )}
-                      
-                      {video.indexing_status === 'failed' && (
-                        <div 
-                          className="absolute top-1 left-1 bg-red-600 text-white text-xs px-2 py-1 rounded cursor-pointer flex items-center gap-1 hover:bg-red-700 transition-colors"
-                          onClick={(e) => {
-                            e.stopPropagation(); // Prevent asset selection
-                            retryIndexing(video.id);
-                          }}
-                          title={video.indexing_error || 'Indexing failed - click to retry'}
-                        >
-                          ❌ Retry
-                        </div>
-                      )}
-                    </div>
-                    <div className="p-2">
-                      <p className="text-sm truncate">{video.name}</p>
-                    </div>
-                  </div>
+                  <VideoItem
+                    key={video.id}
+                    video={video}
+                    index={index}
+                    isSelected={isSelected}
+                    onVideoClick={handleVideoClick}
+                    onDragStart={handleDragStart}
+                  />
                 );
               })
             )}

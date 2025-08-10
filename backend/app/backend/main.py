@@ -184,12 +184,26 @@ async def startup_event():
     """Initialize services on startup"""
     print("🚀 FastAPI application starting up...")
     import os
+    import asyncio
+    
+    # Check TwelveLabs API key
     tl_key = os.getenv("TWELVELABS_API_KEY")
     if tl_key:
         masked = f"{tl_key[:6]}...{tl_key[-4:]}" if len(tl_key) > 10 else "(set)"
         print(f"🔑 [Env] TWELVELABS_API_KEY detected: {masked}")
+        
+        # Start background sync for existing assets
+        try:
+            from app.backend.twelvelabs_service import twelvelabs_service
+            print("🔍 [Startup] Starting background sync for existing unindexed assets...")
+            # TODO: Get all user IDs from database when multi-user support is added
+            # For now, sync for default user
+            asyncio.create_task(twelvelabs_service.sync_existing_assets("user123"))
+            print("✅ [Startup] Background asset sync initiated")
+        except Exception as e:
+            print(f"⚠️ [Startup] Could not start background asset sync: {e}")
     else:
-        print("⚠️ [Env] TWELVELABS_API_KEY not set")
+        print("⚠️ [Env] TWELVELABS_API_KEY not set - TwelveLabs integration disabled")
     
 @app.on_event("shutdown") 
 async def shutdown_event():

@@ -78,6 +78,15 @@ class AssetResponse(BaseModel):
     mimetype: Optional[str] = None
     created_at: str
     updated_at: str
+    # TwelveLabs indexing fields
+    indexing_status: Optional[str] = "not_started"
+    indexing_progress: Optional[int] = 0
+    indexing_error: Optional[str] = None
+    indexing_started_at: Optional[str] = None
+    indexing_completed_at: Optional[str] = None
+    twelvelabs_task_id: Optional[str] = None
+    twelvelabs_video_id: Optional[str] = None
+    user_index_id: Optional[str] = None
 
 @router.get("/assets/list", response_model=List[AssetResponse])
 async def list_assets(request: Request):
@@ -190,8 +199,17 @@ async def register_asset(payload: RegisterAssetRequest, request: Request):
             except Exception:
                 pass
     # TODO: Get actual user_id from authentication
-    # For now, leave user_id as NULL since we don't have user auth yet
+    # For now, use None for database and "user123" for TwelveLabs logic
+    db_user_id = None  # Leave as NULL in database (UUID column)
     user_id = "user123"  # Used for TwelveLabs indexing logic
+    
+    # Get or create the user's TwelveLabs index before creating the asset
+    try:
+        user_index_id = await twelvelabs_service.ensure_user_index(user_id)
+        logger.info(f"📋 [Upload] Using TwelveLabs index {user_index_id} for user {user_id}")
+    except Exception as e:
+        logger.error(f"❌ [Upload] Failed to ensure user index: {e}")
+        user_index_id = None  # Will be set later during background indexing
     
     asset_data = {
         "path": payload.path,
@@ -201,8 +219,9 @@ async def register_asset(payload: RegisterAssetRequest, request: Request):
         "height": height,
         "size": payload.size,
         "mimetype": payload.mimetype,
-        # Don't set user_id in database yet - leave as NULL until we have proper auth
-        "indexing_status": "not_started"
+        "user_id": db_user_id,  # Leave as NULL until we have proper auth
+        "indexing_status": "not_started",
+        "user_index_id": user_index_id  # Pre-populate with user's TwelveLabs index
     }
     
     # Insert into assets table
@@ -234,10 +253,34 @@ async def start_background_indexing(asset_id: str, user_id: str, file_path: str)
         supabase = get_supabase_client()
         signed_url_response = supabase.storage.from_("assets").create_signed_url(file_path, 7200)
         
-        if signed_url_response.error:
+        # Handle different response formats from Supabase client
+        if hasattr(signed_url_response, 'error') and signed_url_response.error:
             raise Exception(f"Failed to create signed URL: {signed_url_response.error}")
+        elif isinstance(signed_url_response, dict) and signed_url_response.get('error'):
+            raise Exception(f"Failed to create signed URL: {signed_url_response['error']}")
         
-        video_url = signed_url_response.signed_url
+        # Extract signed URL from response - try multiple possible formats
+        video_url = None
+        
+        # Try different possible response formats
+        if hasattr(signed_url_response, 'signed_url'):
+            video_url = signed_url_response.signed_url
+        elif isinstance(signed_url_response, dict) and 'signed_url' in signed_url_response:
+            video_url = signed_url_response['signed_url']
+        elif hasattr(signed_url_response, 'signedURL'):
+            video_url = signed_url_response.signedURL
+        elif isinstance(signed_url_response, dict) and 'signedURL' in signed_url_response:
+            video_url = signed_url_response['signedURL']
+        elif isinstance(signed_url_response, dict) and 'data' in signed_url_response:
+            data = signed_url_response['data']
+            if isinstance(data, dict):
+                if 'signedUrl' in data:
+                    video_url = data['signedUrl']
+                elif 'signed_url' in data:
+                    video_url = data['signed_url']
+        
+        if not video_url:
+            raise Exception(f"Could not extract signed URL from response. Type: {type(signed_url_response)}, Content: {signed_url_response}")
         logger.info(f"🔗 [Background] Created signed URL for TwelveLabs access")
         
         # Start indexing using the TwelveLabs service
