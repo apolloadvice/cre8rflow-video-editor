@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import { ArrowUp, Bot } from "lucide-react";
 import { useCommand } from "@/hooks/useCommand";
 import { useEditorStore } from "@/store/editorStore";
+import { useMultiTrackAICommands } from "@/hooks/useMultiTrackAICommands";
 import { parseCommand } from "@/api/apiClient";
 import { useToast } from "@/components/ui/use-toast";
 import { simulateCutCommand, simulateOptimisticEdit } from "@/utils/optimisticEdit";
@@ -52,6 +53,9 @@ const ChatPanel = ({ onChatCommand, onVideoProcessed }: ChatPanelProps) => {
   const setClips = useEditorStore((state) => state.setClips);
   const { activeVideoAsset, setActiveVideoAsset } = useEditorStore();
   const { toast } = useToast();
+  
+  // Multi-track AI commands integration
+  const multiTrackCommands = useMultiTrackAICommands();
   const { startAnimation, processNextClip, simulateProgress, clearCurrentAnimation, startBatchCaptionAnimation, startTrackingTextAnimation } = useAnimationStore();
 
   // Store caption data for timeline integration after animation completes
@@ -707,7 +711,66 @@ const ChatPanel = ({ onChatCommand, onVideoProcessed }: ChatPanelProps) => {
     try {
       debugLog('ChatPanel', 'Starting command parsing', { input, assetPath });
 
-      // NEW: Step 1 - LLM Command Interpretation with unlimited flexibility
+      // NEW: Multi-track command processing (ALWAYS FIRST - this is the default system)
+      debugLog('ChatPanel', 'Processing command through multi-track system (default)');
+      safeSetStatus("Processing your command...");
+      
+      try {
+        const multiTrackResult = await multiTrackCommands.executeCommand(input);
+        debugLog('ChatPanel', 'Multi-track command result', multiTrackResult);
+        
+        if (multiTrackResult.handled) {
+          if (multiTrackResult.success) {
+            // Multi-track command succeeded
+            clearStatusTimers();
+            safeSetStatus(null);
+            safeSetIsThinking(false);
+            setInput("");
+            
+            toast({
+              title: "Command executed",
+              description: multiTrackResult.message || "Command executed successfully",
+            });
+            
+            safeSetMessages((prev) => [...prev, {
+              id: Date.now().toString() + "-assistant",
+              content: `✅ ${multiTrackResult.message || "Command executed successfully"}`,
+              sender: "assistant",
+              timestamp: new Date(),
+            }]);
+            
+            return; // Exit early after successful multi-track command
+          } else {
+            // Multi-track command failed, but was handled - show error and don't fall back
+            clearStatusTimers();
+            safeSetStatus(null);
+            safeSetIsThinking(false);
+            
+            toast({
+              title: "Command failed",
+              description: multiTrackResult.error || "Command could not be executed",
+              variant: "destructive",
+            });
+            
+            safeSetMessages((prev) => [...prev, {
+              id: Date.now().toString() + "-assistant",
+              content: `❌ ${multiTrackResult.error || "Command could not be executed"}`,
+              sender: "assistant",
+              timestamp: new Date(),
+            }]);
+            
+            return; // Exit early - don't fall back to legacy system
+          }
+        }
+        // If not handled by multi-track system, continue to legacy processing
+        debugLog('ChatPanel', 'Multi-track system did not handle command, falling back to legacy');
+      } catch (multiTrackError) {
+        debugLog('ChatPanel', 'Multi-track command processing failed', multiTrackError);
+        console.warn('🎵 [ChatPanel] Multi-track command processing failed, falling back to legacy:', multiTrackError);
+        // Continue to legacy processing
+      }
+
+      // Legacy LLM Command Interpretation with unlimited flexibility
       safeSetStatus("Reading your instructions…");
       const llmResult = await interpretCommandWithLLM(input, assetPath);
 
@@ -1463,6 +1526,7 @@ const ChatPanel = ({ onChatCommand, onVideoProcessed }: ChatPanelProps) => {
 
   return (
     <div className="h-full flex flex-col bg-cre8r-gray-800 border-l border-cre8r-gray-700">
+      
       <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
         {messages.length === 0 ? (
           <div className="flex-1 flex flex-col items-center justify-center text-center px-4">
@@ -1471,7 +1535,7 @@ const ChatPanel = ({ onChatCommand, onVideoProcessed }: ChatPanelProps) => {
             </div>
             <h3 className="font-semibold mb-2">Tell me what edits to apply to your video</h3>
             <p className="text-sm text-cre8r-gray-400 mb-6">
-              For example: "Trim silent parts", "Add cinematic color grade", or "Crop for vertical"
+              Multi-track timeline ready. Try: "cut out 10-20 from video track", "add audio track", or "move to title track"
             </p>
             
             <div className="grid grid-cols-2 gap-2 w-full max-w-md">
@@ -1541,7 +1605,7 @@ const ChatPanel = ({ onChatCommand, onVideoProcessed }: ChatPanelProps) => {
 
           <form className="flex w-full items-end gap-2" onSubmit={handleSubmit}>
             <Textarea
-              placeholder="Tell me what edits to apply to your video... (e.g. 'cut 0-5', 'add text at 10s saying Welcome')&#10;&#10;💡 Tip: Press Enter to send, Shift+Enter for new line, Cmd+A to select all"
+              placeholder="Tell me what edits to apply to your video... (e.g. 'cut out 10-20 from video track', 'add audio track', 'move to title track')&#10;&#10;💡 Tip: Press Enter to send, Shift+Enter for new line, Cmd+A to select all"
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
