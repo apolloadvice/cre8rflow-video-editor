@@ -17,6 +17,7 @@ from datetime import datetime
 
 from .export_profiles import export_profiles_service, ExportCategory, ExportProfile
 from ..video_backend.ffmpeg_pipeline import FFMpegPipeline
+from ..video_backend.performance_optimizer import MultiTrackExportOptimizer, ExportErrorAnalyzer
 from ..timeline import Timeline
 import logging
 from supabase import create_client, Client
@@ -310,32 +311,80 @@ async def process_export_job(job_id: str, timeline_dict: Dict[str, Any],
         if multitrack_intervals and len(multitrack_intervals) > 0:
             logger.info(f"Export job {job_id}: Using {len(multitrack_intervals)} multi-track intervals for professional export")
             
-            # Quality mapping from profile to FFmpeg quality setting
-            quality_map = {
-                "youtube_1080p_h264": "high",
-                "youtube_4k_h264": "high", 
-                "web_1080p_h264": "high",
-                "web_720p_h264": "medium",
-                "mobile_720p_h264": "medium",
-                "instagram_feed_1080": "medium",
-                "instagram_story_1080": "medium",
-                "tiktok_1080": "medium"
-            }
-            quality = quality_map.get(profile_id, "high")
+            # Initialize performance optimizer and error analyzer
+            optimizer = MultiTrackExportOptimizer()
             
-            # Log multi-track export details
-            track_counts = {}
-            for interval in multitrack_intervals:
-                track_kind = interval.get('trackKind', 'unknown')
-                track_counts[track_kind] = track_counts.get(track_kind, 0) + 1
-            
-            total_duration = sum(float(interval.get('sourceDuration', 0)) for interval in multitrack_intervals)
-            logger.info(f"Export job {job_id}: Multi-track composition - {total_duration:.1f}s total")
-            logger.info(f"Export job {job_id}: Track breakdown: {track_counts}")
-            
-            # Use new multi-track export method
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, pipeline.render_multitrack_export, multitrack_intervals, output_path, quality)
+            try:
+                # Enhanced validation and performance analysis
+                is_valid, validation_errors = optimizer.validate_multitrack_intervals(multitrack_intervals)
+                if not is_valid:
+                    error_msg = f"Multi-track validation failed: {'; '.join(validation_errors)}"
+                    logger.error(f"Export job {job_id}: {error_msg}")
+                    raise ValueError(error_msg)
+                
+                # Analyze export complexity for optimization
+                complexity_analysis = optimizer.analyze_export_complexity(multitrack_intervals)
+                logger.info(f"Export job {job_id}: Complexity analysis: {complexity_analysis['complexity_score']:.1f} score, estimated {complexity_analysis['estimated_processing_time']:.1f}s")
+                
+                # Monitor system resources
+                system_resources = optimizer.monitor_system_resources()
+                if system_resources:
+                    logger.info(f"Export job {job_id}: System resources - CPU: {system_resources.get('cpu_usage_percent', 0):.1f}%, Memory: {system_resources.get('memory_used_percent', 0):.1f}%")
+                
+                # Quality mapping with complexity consideration
+                quality_map = {
+                    "youtube_1080p_h264": "high",
+                    "youtube_4k_h264": "high", 
+                    "web_1080p_h264": "high",
+                    "web_720p_h264": "medium",
+                    "mobile_720p_h264": "medium",
+                    "instagram_feed_1080": "medium",
+                    "instagram_story_1080": "medium",
+                    "tiktok_1080": "medium"
+                }
+                quality = quality_map.get(profile_id, "high")
+                
+                # Adjust quality based on complexity to prevent timeouts
+                if complexity_analysis['complexity_score'] > 100:
+                    if quality == "high":
+                        quality = "medium"
+                        logger.info(f"Export job {job_id}: Adjusted quality to medium due to high complexity")
+                
+                # Log multi-track export details with enhanced metrics
+                track_counts = complexity_analysis['track_counts']
+                total_duration = complexity_analysis['total_duration']
+                
+                logger.info(f"Export job {job_id}: Multi-track composition - {total_duration:.1f}s total")
+                logger.info(f"Export job {job_id}: Track breakdown: {track_counts}")
+                logger.info(f"Export job {job_id}: Advanced features - Transforms: {complexity_analysis['has_transforms']}, Effects: {complexity_analysis['has_effects']}")
+                
+                # Start performance monitoring
+                optimizer.start_performance_monitoring()
+                optimizer.record_performance_metric('intervals_processed', len(multitrack_intervals))
+                
+                # Use new multi-track export method with performance monitoring
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, pipeline.render_multitrack_export, multitrack_intervals, output_path, quality)
+                
+                # Performance summary
+                performance_summary = optimizer.finish_performance_monitoring(output_path)
+                logger.info(f"Export job {job_id}: Performance summary - {performance_summary['summary']}")
+                
+            except ValueError as ve:
+                # Validation errors - user-fixable
+                logger.error(f"Export job {job_id}: Validation error: {str(ve)}")
+                raise ve
+            except Exception as e:
+                # Analyze FFmpeg errors for better diagnostics
+                error_analysis = ExportErrorAnalyzer.analyze_error(str(e))
+                logger.error(f"Export job {job_id}: Error category: {error_analysis['category']}, severity: {error_analysis['severity']}")
+                logger.error(f"Export job {job_id}: Suggestions: {'; '.join(error_analysis['suggestions'])}")
+                
+                # Re-raise with enhanced error message
+                enhanced_error = f"Multi-track export failed ({error_analysis['category']}): {str(e)}"
+                if error_analysis['suggestions']:
+                    enhanced_error += f". Suggestions: {'; '.join(error_analysis['suggestions'])}"
+                raise RuntimeError(enhanced_error)
             
         # PRIORITY 2: Use timeline intervals for frame-accurate export if provided
         elif intervals and len(intervals) > 0:

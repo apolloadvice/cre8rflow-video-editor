@@ -12,6 +12,7 @@ import React, { useRef, useCallback, useEffect } from 'react';
 import { cn } from '@/lib/utils';
 import { useMultiTrackStore } from '@/store/multiTrackStore';
 import { useDragDropEnhanced } from '@/hooks/useDragDropEnhanced';
+import { useAdvancedDragDrop } from '@/hooks/useAdvancedDragDrop';
 import { useTimelineZoom } from '@/hooks/useTimelineZoom';
 import { useTimelineMarkersNew } from '@/hooks/useTimelineMarkersNew';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
@@ -27,6 +28,8 @@ import TimelinePlayhead from './TimelinePlayhead';
 import TimelineMarkers from './TimelineMarkers';
 import DragIndicators from './DragIndicators';
 import DragCursor from './DragCursor';
+import DragPreview from '@/components/timeline/DragPreview';
+import DraggableElement from '@/components/timeline/DraggableElement';
 
 interface MultiTrackTimelineProps {
   className?: string;
