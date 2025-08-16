@@ -38,6 +38,7 @@ import {
 } from '@/api/apiClient';
 import { useExportIntervalTree, serializeExportIntervals, debugExportIntervals } from '@/hooks/useExportIntervalTree';
 import { useExportJobProgress, useVideoProgressAnimation } from '@/hooks/useSmoothedProgress';
+import { useMultiTrackExport } from '@/hooks/useMultiTrackExport';
 
 interface ExportDialogProps {
   isOpen: boolean;
@@ -67,8 +68,9 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
   const [uiStartSignal, setUiStartSignal] = useState<number | null>(null);
   const uiProgress = useVideoProgressAnimation('processing', duration, uiStartSignal || undefined);
   
-  // NEW: Export interval tree for frame-accurate exports
-  const exportTree = useExportIntervalTree();
+  // Export integrations
+  const exportTree = useExportIntervalTree();  // Legacy timeline export
+  const multiTrackExport = useMultiTrackExport();  // NEW: Multi-track export
 
   // Individual job progress component with smooth animation
   const JobProgressDisplay: React.FC<{ job: ExportJob; startSignal?: number }> = ({ job, startSignal }) => {
@@ -347,40 +349,80 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
     console.log('🚀 [Progress] Starting progress animation immediately for temp job:', tempJobId);
 
     try {
-      // Build export intervals for frame-accurate processing
-      console.log('🟣 [ExportUI] Building intervals now');
-      const exportIntervals = exportTree.buildExportIntervals();
-      const exportSummary = exportTree.getExportSummary();
-      console.log('🟣 [ExportUI] Intervals built. Summary:', exportSummary);
+      // Determine export method: Multi-track or legacy
+      let exportRequest: any;
+      let exportDescription: string;
       
-      // Validate export content
-      if (exportSummary.isEmpty) {
-        toast({
-          title: "Export Error", 
-          description: exportSummary.message,
-          variant: "destructive"
-        });
-        // Cleanup the temporary job since we won't start a real export
-        console.log('🔴 [ExportUI] Validation failed. Cleaning temp job.');
-        setExportJobs(prev => prev.filter(j => j.job_id !== tempJobId));
-        setStartingJobId(null);
-        setStartingJobPlaceholder(null);
-        setIsStartingExport(false);
-        setIsExporting(false);
-        return;
+      if (multiTrackExport.isTimelineReadyForExport()) {
+        // PRIORITY 1: Use multi-track export for professional composition
+        console.log('🎬 [ExportUI] Using multi-track export system');
+        
+        const validation = multiTrackExport.validateTimelineForExport();
+        if (!validation.isValid) {
+          toast({
+            title: "Multi-Track Export Error",
+            description: validation.errors.join(', '),
+            variant: "destructive"
+          });
+          // Cleanup the temporary job
+          setExportJobs(prev => prev.filter(j => j.job_id !== tempJobId));
+          setStartingJobId(null);
+          setStartingJobPlaceholder(null);
+          setIsStartingExport(false);
+          setIsExporting(false);
+          return;
+        }
+        
+        const multitrackIntervals = multiTrackExport.buildExportIntervals();
+        const timelineStats = multiTrackExport.getTimelineStats();
+        
+        console.log('🎬 [Export] Multi-track timeline stats:', timelineStats);
+        console.log('🎬 [Export] Multi-track intervals:', multitrackIntervals.length);
+        
+        exportRequest = {
+          timeline: timeline,                          // Keep for backward compatibility
+          multitrack_intervals: multitrackIntervals,   // NEW: Multi-track intervals
+          profile_id: selectedProfile.id,
+          output_filename: customFilename || undefined
+        };
+        
+        exportDescription = `Multi-track export: ${timelineStats?.activeTracks} tracks, ${timelineStats?.totalElements} elements`;
+        
+      } else {
+        // FALLBACK: Use legacy export system
+        console.log('🟣 [ExportUI] Using legacy export system (no multi-track content)');
+        
+        const exportIntervals = exportTree.buildExportIntervals();
+        const exportSummary = exportTree.getExportSummary();
+        
+        // Validate export content
+        if (exportSummary.isEmpty) {
+          toast({
+            title: "Export Error", 
+            description: exportSummary.message,
+            variant: "destructive"
+          });
+          // Cleanup the temporary job
+          setExportJobs(prev => prev.filter(j => j.job_id !== tempJobId));
+          setStartingJobId(null);
+          setStartingJobPlaceholder(null);
+          setIsStartingExport(false);
+          setIsExporting(false);
+          return;
+        }
+        
+        console.log('🎬 [Export] Legacy export intervals:');
+        debugExportIntervals(exportIntervals);
+        
+        exportRequest = {
+          timeline: timeline,                                    // Keep for backward compatibility
+          intervals: serializeExportIntervals(exportIntervals), // Frame-accurate intervals
+          profile_id: selectedProfile.id,
+          output_filename: customFilename || undefined
+        };
+        
+        exportDescription = exportSummary.message;
       }
-      
-      // Log export details for debugging
-      console.log('🎬 [Export] Starting export with intervals:');
-      debugExportIntervals(exportIntervals);
-      console.log('🎬 [Export] Summary:', exportSummary);
-
-      const exportRequest = {
-        timeline: timeline,                                    // Keep for backward compatibility
-        intervals: serializeExportIntervals(exportIntervals), // NEW: Frame-accurate intervals
-        profile_id: selectedProfile.id,
-        output_filename: customFilename || undefined
-      };
 
       console.log('🟣 [ExportUI] Calling startProfessionalExport');
       const response = await startProfessionalExport(exportRequest);
@@ -389,7 +431,7 @@ const ExportDialog: React.FC<ExportDialogProps> = ({
       if (response.data.success) {
         toast({
           title: "Export Started",
-          description: `Export started - ${exportSummary.message}`,
+          description: `Export started - ${exportDescription}`,
         });
         
         // Replace the temporary job with the real job_id so the animation continues seamlessly

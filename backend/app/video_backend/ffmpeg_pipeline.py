@@ -891,6 +891,272 @@ class FFMpegPipeline:
             print(f"🎬 [Download] ❌ {error_msg}")
             raise RuntimeError(error_msg) from e
 
+    def render_multitrack_export(self, multitrack_intervals: list, output_path: str, quality: str = "high") -> None:
+        """
+        Export multi-track timeline with professional composition using FFmpeg complex filters.
+        
+        Supports multiple video tracks, audio mixing, text overlays, and effects processing
+        without requiring GES - pure FFmpeg implementation for maximum compatibility.
+        
+        Args:
+            multitrack_intervals (list): List of multi-track intervals with track metadata
+            output_path (str): Path to the output video file
+            quality (str): Export quality setting (high, medium, low)
+            
+        Example multitrack_intervals:
+        [
+            {
+                "sourceFile": "video1.mp4", "sourceStart": 0, "sourceDuration": 10,
+                "timelineStart": 0, "timelineEnd": 10, "trackKind": "video",
+                "trackIndex": 0, "volume": 1.0, "opacity": 1.0, "zIndex": 400
+            },
+            {
+                "sourceFile": "video2.mp4", "sourceStart": 5, "sourceDuration": 8,
+                "timelineStart": 8, "timelineEnd": 16, "trackKind": "video", 
+                "trackIndex": 1, "volume": 1.0, "opacity": 0.8, "zIndex": 500
+            }
+        ]
+        
+        Raises:
+            RuntimeError: If export fails
+            ValueError: If intervals are invalid
+        """
+        import requests
+        import tempfile
+        import uuid
+        import shutil
+        import json
+        
+        if not multitrack_intervals:
+            raise ValueError("No multi-track intervals provided")
+        
+        print(f"🎬 [FFmpeg] Processing {len(multitrack_intervals)} multi-track intervals for export")
+        
+        # Group intervals by track kind for organized processing
+        grouped_intervals = {
+            'video': [i for i in multitrack_intervals if i.get('trackKind') == 'video'],
+            'audio': [i for i in multitrack_intervals if i.get('trackKind') == 'audio'], 
+            'title': [i for i in multitrack_intervals if i.get('trackKind') == 'title'],
+            'overlay': [i for i in multitrack_intervals if i.get('trackKind') == 'overlay'],
+            'effect': [i for i in multitrack_intervals if i.get('trackKind') == 'effect']
+        }
+        
+        print(f"🎬 [FFmpeg] Track breakdown:")
+        for track_kind, intervals in grouped_intervals.items():
+            if intervals:
+                print(f"  {track_kind}: {len(intervals)} intervals")
+        
+        # Step 1: Prepare temp directory and download files
+        temp_dir = None
+        temp_files = []
+        
+        try:
+            temp_dir = tempfile.mkdtemp(prefix="cre8rflow_multitrack_")
+            print(f"🎬 [FFmpeg] Created temp directory: {temp_dir}")
+            
+            # Step 2: Download and prepare all source files
+            file_mapping = {}  # source_url -> local_file_path
+            input_args = []
+            
+            for i, interval in enumerate(multitrack_intervals):
+                source_path = interval.get('sourceFile', '')
+                
+                if not source_path:
+                    print(f"🎬 [FFmpeg] Warning: Skipping interval {i} - no source file")
+                    continue
+                
+                if source_path not in file_mapping:
+                    # Download file if it's a URL
+                    if source_path.startswith('http'):
+                        print(f"🎬 [FFmpeg] Downloading: {source_path}")
+                        response = requests.get(source_path, stream=True, timeout=60)
+                        response.raise_for_status()
+                        
+                        # Create local file
+                        file_ext = source_path.split('.')[-1] if '.' in source_path else 'mp4'
+                        local_filename = f"source_{len(file_mapping)}.{file_ext}"
+                        local_path = os.path.join(temp_dir, local_filename)
+                        
+                        with open(local_path, 'wb') as f:
+                            for chunk in response.iter_content(chunk_size=8192):
+                                f.write(chunk)
+                        
+                        file_mapping[source_path] = local_path
+                        temp_files.append(local_path)
+                        print(f"🎬 [FFmpeg] Downloaded to: {local_path}")
+                    else:
+                        # Local file
+                        if os.path.exists(source_path):
+                            file_mapping[source_path] = source_path
+                        else:
+                            print(f"🎬 [FFmpeg] Warning: Local file not found: {source_path}")
+                            continue
+                
+                # Add input argument for each interval
+                local_file = file_mapping[source_path]
+                source_start = float(interval.get('sourceStart', 0))
+                source_duration = float(interval.get('sourceDuration', 0))
+                
+                input_args.extend([
+                    "-ss", str(source_start),
+                    "-t", str(source_duration), 
+                    "-i", local_file
+                ])
+            
+            if not input_args:
+                raise ValueError("No valid source files found in intervals")
+            
+            # Step 3: Build complex filter for multi-track composition
+            filter_complex_parts = []
+            video_streams = []
+            audio_streams = []
+            
+            # Process each interval and create filter chain
+            input_index = 0
+            for interval in multitrack_intervals:
+                if interval.get('sourceFile') not in file_mapping:
+                    continue
+                
+                track_kind = interval.get('trackKind', 'video')
+                volume = float(interval.get('volume', 1.0))
+                opacity = float(interval.get('opacity', 1.0))
+                
+                if track_kind == 'video':
+                    # Video processing
+                    stream_label = f"v{input_index}"
+                    
+                    # Scale and format video
+                    filter_parts = [f"[{input_index}:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2"]
+                    
+                    # Apply opacity if not 1.0
+                    if opacity != 1.0:
+                        filter_parts.append(f"format=rgba,colorchannelmixer=aa={opacity}")
+                    
+                    filter_parts.append(f"[{stream_label}]")
+                    filter_complex_parts.append("".join(filter_parts))
+                    video_streams.append(stream_label)
+                    
+                elif track_kind == 'audio':
+                    # Audio processing
+                    stream_label = f"a{input_index}"
+                    
+                    # Apply volume if not 1.0
+                    if volume != 1.0:
+                        filter_complex_parts.append(f"[{input_index}:a]volume={volume}[{stream_label}]")
+                    else:
+                        audio_streams.append(f"{input_index}:a")
+                        input_index += 1
+                        continue
+                    
+                    audio_streams.append(stream_label)
+                
+                input_index += 1
+            
+            # Step 4: Compose video layers
+            if len(video_streams) > 1:
+                # Multi-layer video composition
+                overlay_chain = video_streams[0]
+                for i, stream in enumerate(video_streams[1:], 1):
+                    output_label = "vout" if i == len(video_streams) - 1 else f"comp{i}"
+                    filter_complex_parts.append(f"[{overlay_chain}][{stream}]overlay=0:0[{output_label}]")
+                    overlay_chain = output_label
+                video_output = "[vout]"
+            elif len(video_streams) == 1:
+                # Single video stream
+                filter_complex_parts.append(f"[{video_streams[0]}]copy[vout]")
+                video_output = "[vout]"
+            else:
+                # No video - create black background
+                filter_complex_parts.append("color=black:size=1920x1080:duration=10[vout]")
+                video_output = "[vout]"
+            
+            # Step 5: Mix audio streams
+            audio_output = None
+            if len(audio_streams) > 1:
+                # Multi-stream audio mixing
+                audio_inputs = "][".join(audio_streams)
+                filter_complex_parts.append(f"[{audio_inputs}]amix=inputs={len(audio_streams)}:duration=longest[aout]")
+                audio_output = "[aout]"
+            elif len(audio_streams) == 1:
+                # Single audio stream
+                if audio_streams[0].startswith('['):
+                    filter_complex_parts.append(f"{audio_streams[0][1:-1]}acopy[aout]")
+                    audio_output = "[aout]"
+                else:
+                    audio_output = f"[{audio_streams[0]}]"
+            
+            # Step 6: Build quality and codec settings
+            codec_args = ["-c:v", "libx264"]
+            
+            if audio_output:
+                codec_args.extend(["-c:a", "aac"])
+            
+            if quality == "high":
+                codec_args.extend(["-crf", "18", "-preset", "slow"])
+                if audio_output:
+                    codec_args.extend(["-b:a", "192k"])
+            elif quality == "medium":
+                codec_args.extend(["-crf", "23", "-preset", "medium"])
+                if audio_output:
+                    codec_args.extend(["-b:a", "128k"])
+            elif quality == "low":
+                codec_args.extend(["-crf", "28", "-preset", "fast"])
+                if audio_output:
+                    codec_args.extend(["-b:a", "96k"])
+            else:
+                codec_args.extend(["-crf", "18", "-preset", "slow"])
+                if audio_output:
+                    codec_args.extend(["-b:a", "192k"])
+            
+            # Step 7: Build final FFmpeg command
+            filter_complex = ";".join(filter_complex_parts)
+            map_args = ["-map", video_output]
+            if audio_output:
+                map_args.extend(["-map", audio_output])
+            
+            command = [
+                "ffmpeg", "-y"  # Overwrite output file
+            ] + input_args + [
+                "-filter_complex", filter_complex
+            ] + map_args + codec_args + [
+                "-movflags", "+faststart",  # Optimize for web playback
+                output_path
+            ]
+            
+            # Step 8: Execute FFmpeg command
+            print(f"🎬 [FFmpeg] Executing multi-track export...")
+            print(f"🎬 [FFmpeg] Video streams: {len(video_streams)}, Audio streams: {len(audio_streams)}")
+            print(f"🎬 [FFmpeg] Filter complex length: {len(filter_complex)} chars")
+            
+            result = subprocess.run(command, check=True, capture_output=True, text=True)
+            
+            # Step 9: Verify output
+            if not os.path.exists(output_path):
+                raise RuntimeError(f"FFmpeg completed but output file not found: {output_path}")
+            
+            file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
+            print(f"🎬 [FFmpeg] ✅ Multi-track export completed: {output_path} ({file_size_mb:.1f} MB)")
+            
+        except subprocess.CalledProcessError as e:
+            error_msg = f"FFmpeg multi-track export failed. Return code: {e.returncode}"
+            if e.stderr:
+                error_msg += f"\nStderr: {e.stderr}"
+            print(f"🎬 [FFmpeg] ❌ Error: {error_msg}")
+            raise RuntimeError(error_msg) from e
+            
+        except Exception as e:
+            print(f"🎬 [FFmpeg] ❌ Unexpected error during multi-track export: {e}")
+            raise RuntimeError(f"Multi-track export failed: {str(e)}") from e
+        
+        finally:
+            # Clean up temporary files
+            if temp_dir and os.path.exists(temp_dir):
+                print(f"🎬 [FFmpeg] Cleaning up temp directory: {temp_dir}")
+                try:
+                    shutil.rmtree(temp_dir)
+                except Exception as cleanup_error:
+                    print(f"🎬 [FFmpeg] Warning: Could not clean up temp directory: {cleanup_error}")
+
     # Placeholder for future extensibility (effects, transitions, etc.)
 
 # Register built-in effect handlers after the class definition

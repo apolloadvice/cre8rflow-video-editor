@@ -36,6 +36,9 @@ class ExportRequest(BaseModel):
     
     # NEW: Support for precise timeline intervals (frame-accurate export)
     intervals: Optional[List[Dict[str, Any]]] = Field(None, description="Timeline export intervals for frame-accurate processing")
+    
+    # NEW: Multi-track intervals for professional multi-track composition
+    multitrack_intervals: Optional[List[Dict[str, Any]]] = Field(None, description="Multi-track intervals with track metadata for advanced composition")
 
 
 class QuickExportRequest(BaseModel):
@@ -274,7 +277,8 @@ async def upload_export_to_supabase(file_path: str, job_id: str) -> str:
 async def process_export_job(job_id: str, timeline_dict: Dict[str, Any], 
                            profile_id: str, output_path: str, 
                            custom_settings: Optional[Dict[str, Any]] = None,
-                           intervals: Optional[List[Dict[str, Any]]] = None):
+                           intervals: Optional[List[Dict[str, Any]]] = None,
+                           multitrack_intervals: Optional[List[Dict[str, Any]]] = None):
     """Process an export job asynchronously with optional timeline intervals support"""
     try:
         job_manager.update_job_status(job_id, "processing", 0.0)
@@ -302,8 +306,39 @@ async def process_export_job(job_id: str, timeline_dict: Dict[str, Any],
         # Update progress
         job_manager.update_job_status(job_id, "processing", 25.0)
         
-        # NEW: Use timeline intervals for frame-accurate export if provided
-        if intervals and len(intervals) > 0:
+        # PRIORITY 1: Use multi-track intervals for professional composition if provided
+        if multitrack_intervals and len(multitrack_intervals) > 0:
+            logger.info(f"Export job {job_id}: Using {len(multitrack_intervals)} multi-track intervals for professional export")
+            
+            # Quality mapping from profile to FFmpeg quality setting
+            quality_map = {
+                "youtube_1080p_h264": "high",
+                "youtube_4k_h264": "high", 
+                "web_1080p_h264": "high",
+                "web_720p_h264": "medium",
+                "mobile_720p_h264": "medium",
+                "instagram_feed_1080": "medium",
+                "instagram_story_1080": "medium",
+                "tiktok_1080": "medium"
+            }
+            quality = quality_map.get(profile_id, "high")
+            
+            # Log multi-track export details
+            track_counts = {}
+            for interval in multitrack_intervals:
+                track_kind = interval.get('trackKind', 'unknown')
+                track_counts[track_kind] = track_counts.get(track_kind, 0) + 1
+            
+            total_duration = sum(float(interval.get('sourceDuration', 0)) for interval in multitrack_intervals)
+            logger.info(f"Export job {job_id}: Multi-track composition - {total_duration:.1f}s total")
+            logger.info(f"Export job {job_id}: Track breakdown: {track_counts}")
+            
+            # Use new multi-track export method
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, pipeline.render_multitrack_export, multitrack_intervals, output_path, quality)
+            
+        # PRIORITY 2: Use timeline intervals for frame-accurate export if provided
+        elif intervals and len(intervals) > 0:
             logger.info(f"Export job {job_id}: Using {len(intervals)} timeline intervals for frame-accurate export")
             
             # Quality mapping from profile to FFmpeg quality setting
@@ -526,7 +561,8 @@ async def export_professional(request: ExportRequest, background_tasks: Backgrou
                 request.profile_id, 
                 output_path,
                 request.custom_settings,
-                request.intervals  # NEW: Pass timeline intervals for frame-accurate export
+                request.intervals,  # Pass timeline intervals for frame-accurate export
+                request.multitrack_intervals  # NEW: Pass multi-track intervals for professional composition
             )
         )
         job_manager._active_jobs[job_id] = task
